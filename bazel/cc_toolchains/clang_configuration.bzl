@@ -172,6 +172,42 @@ def _compute_clang_cpp_include_search_paths(repository_ctx, clang, sysroot):
     ]
 
 def _configure_clang_toolchain_impl(repository_ctx):
+    # Stage 0 Windows builds use `@rules_cc`'s auto-configured `clang-cl`
+    # toolchain (`USE_CLANG_CL=1`). Emit an empty `BUILD` file so
+    # `register_toolchains` falls through to `@rules_cc`, while still
+    # generating `clang_detected_variables.bzl` for rules that load
+    # `llvm_symbolizer`.
+    if repository_ctx.os.name.lower().startswith("windows"):
+        symbolizer = repository_ctx.which("llvm-symbolizer")
+        if not symbolizer:
+            bazel_llvm = repository_ctx.os.environ.get("BAZEL_LLVM")
+            if bazel_llvm:
+                candidate = repository_ctx.path(bazel_llvm).get_child("bin").get_child("llvm-symbolizer.exe")
+                if candidate.exists:
+                    symbolizer = candidate
+        symbolizer_str = str(symbolizer).replace("\\", "/") if symbolizer else ""
+        repository_ctx.file(
+            "BUILD",
+            "# Stage 0 Windows builds use @rules_cc's clang-cl toolchain.\n",
+            executable = False,
+        )
+        repository_ctx.template(
+            "clang_detected_variables.bzl",
+            repository_ctx.attr._clang_detected_variables_template,
+            substitutions = {
+                "{CLANG_BINDIR}": "",
+                "{CLANG_INCLUDE_DIRS}": "[]",
+                "{CLANG_RESOURCE_DIR}": "",
+                "{CLANG_VERSION_FOR_CACHE}": "unknown",
+                "{CLANG_VERSION}": "None",
+                "{LLVM_BINDIR}": "",
+                "{LLVM_SYMBOLIZER}": symbolizer_str,
+                "{SYSROOT}": "None",
+            },
+            executable = False,
+        )
+        return
+
     # First just symlink in the untemplated parts of the toolchain repo.
     repository_ctx.symlink(repository_ctx.attr._clang_toolchain_build, "BUILD")
     repository_ctx.symlink(
@@ -217,13 +253,6 @@ def _configure_clang_toolchain_impl(repository_ctx):
         ar_path = repository_ctx.which("llvm-ar")
         if not ar_path:
             fail("`llvm-ar` not found in PATH or adjacent to clang")
-
-    # By default Windows uses '\' in its paths. These will be
-    # interpreted as escape characters and fail the build, thus
-    # we must manually replace the backslashes with '/'
-    if repository_ctx.os.name.lower().startswith("windows"):
-        resource_dir = resource_dir.replace("\\", "/")
-        include_dirs = [str(s).replace("\\", "/") for s in include_dirs]
 
     repository_ctx.template(
         "clang_detected_variables.bzl",
@@ -281,7 +310,7 @@ configure_clang_toolchain = repository_rule(
             ],
         ),
     },
-    environ = ["CC"],
+    environ = ["BAZEL_LLVM", "CC"],
 )
 
 clang_toolchain_extension = module_extension(
