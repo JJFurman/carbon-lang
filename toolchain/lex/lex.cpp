@@ -322,13 +322,16 @@ using SimdMaskArrayT = std::array<SimdMaskT, sizeof(SimdMaskT) + 1>;
 
 // A table of masks to include 0-16 bytes of an SSE register.
 static constexpr SimdMaskArrayT PrefixMasks = []() constexpr {
+  // MSVC's STL does not specialize `std::numeric_limits` for
+  // `unsigned __int128`, where `max()` silently evaluates to `0`.
+  constexpr unsigned __int128 AllOnes = ~static_cast<unsigned __int128>(0);
+  static_assert(AllOnes != 0 && (AllOnes >> 127) == 1);
   SimdMaskArrayT masks = {};
   for (int i = 1; i < static_cast<int>(masks.size()); ++i) {
     masks[i] =
         // The SIMD types and constexpr require a C-style cast.
         // NOLINTNEXTLINE(google-readability-casting)
-        (SimdMaskT)(std::numeric_limits<unsigned __int128>::max() >>
-                    ((sizeof(SimdMaskT) - i) * 8));
+        (SimdMaskT)(AllOnes >> ((sizeof(SimdMaskT) - i) * 8));
   }
   return masks;
 }();
