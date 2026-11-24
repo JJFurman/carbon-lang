@@ -105,16 +105,23 @@ auto GetBusyboxInfo(const char* argv0) -> ErrorOr<BusyboxInfo> {
                           ? WalkUp(std::move(parent_path)) / "lib" / "carbon"
                           : WalkUp(WalkUp(std::move(parent_path)));
 #ifdef _WIN32
-      constexpr std::string_view BusyboxFilename = "carbon-busybox.exe";
+      for (std::string_view busybox_filename :
+           {"carbon-busybox.exe", "carbon-busybox"}) {
+        auto busybox_path = lib_path / busybox_filename;
+        if (auto access = Filesystem::Cwd().Access(busybox_path);
+            access.ok() && *access) {
+          info.bin_path = busybox_path;
+          return info;
+        }
+      }
 #else
-      constexpr std::string_view BusyboxFilename = "carbon-busybox";
-#endif
-      auto busybox_path = lib_path / BusyboxFilename;
+      auto busybox_path = lib_path / "carbon-busybox";
       if (auto access = Filesystem::Cwd().Access(busybox_path);
           access.ok() && *access) {
         info.bin_path = busybox_path;
         return info;
       }
+#endif
     }
 
     // Try to walk through another layer of symlinks and see if we can find the

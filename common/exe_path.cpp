@@ -45,8 +45,16 @@ auto FindExecutablePath(const char* argv0) -> std::string {
   // `argv[0]`.
   bool has_separator = llvm::any_of(
       argv0_ref, [](char c) { return llvm::sys::path::is_separator(c); });
-  if (has_separator && RealPathMatches(argv0_ref, exe_path)) {
-    return argv0_ref.str();
+  if (has_separator) {
+    if (RealPathMatches(argv0_ref, exe_path)) {
+      return argv0_ref.str();
+    }
+#ifdef _WIN32
+    if (!argv0_ref.ends_with_insensitive(".exe") &&
+        RealPathMatches((argv0_ref + ".exe").str(), exe_path)) {
+      return argv0_ref.str();
+    }
+#endif
   }
 
   // If we can find `argv[0]` in `$PATH`, use the form from that.

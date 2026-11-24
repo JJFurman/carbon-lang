@@ -475,6 +475,11 @@ TEST_F(RuntimesCacheTest, ConcurrentBuildsWithFailedLocking) {
   std::filesystem::path build2_path;
   auto build2_lambda = [&build2_path, &runtimes2, target, &m, &cv,
                         &build_started] {
+    auto notify_main = llvm::scope_exit([&] {
+      std::unique_lock lock(m);
+      build_started = true;
+      cv.notify_one();
+    });
     auto build_result2 = runtimes2.Build(Runtimes::ClangResourceDir);
     ASSERT_THAT(build_result2, IsSuccess(VariantWith<Runtimes::Builder>(_)));
     auto builder2 = std::get<Runtimes::Builder>(*std::move(build_result2));
@@ -484,6 +489,7 @@ TEST_F(RuntimesCacheTest, ConcurrentBuildsWithFailedLocking) {
     // built runtime. The goal is to get as close as we can to having these
     // commits actually race so that a failure in that mode would emerge as a
     // flake of the test. None of this is providing correctness.
+    notify_main.release();
     {
       std::unique_lock lock(m);
       build_started = true;
@@ -723,12 +729,18 @@ TEST_F(RuntimesCacheTest, LookupWithSmallNumberOfStaleRuntimes) {
       AllOf(Gt(now - std::chrono::days(2)), Lt(now + std::chrono::days(2))));
 }
 
-#ifndef _WIN32
 TEST_F(RuntimesCacheTest, LookupWithManyStaleRuntimes) {
   auto runtimes1 = *cache_.Lookup({.target = "aarch64-unknown-unknown-fresh1"});
   auto stale_runtimes = LookupNRuntimes(RuntimesTestPeer::CacheMinNumEntries());
   auto runtimes2 = *cache_.Lookup({.target = "aarch64-unknown-unknown-fresh2"});
 
+#ifdef _WIN32
+  // Write marker files into each directory so we can verify which directories
+  // were preserved vs. pruned and re-created.
+  runtimes1.base_dir().WriteFileFromString(".marker", "1").Check();
+  runtimes2.base_dir().WriteFileFromString(".marker", "2").Check();
+  stale_runtimes[0].base_dir().WriteFileFromString(".marker", "stale").Check();
+#else
   // Get the Unix-like inode of the directories so we can check whether
   // subsequent lookups create a new directory. For the stale directory, we
   // don't just get the inode, we also create an open directory to it. This
@@ -743,6 +755,7 @@ TEST_F(RuntimesCacheTest, LookupWithManyStaleRuntimes) {
   // Confirm that our extra open directory points to the some entity as the
   // runtimes has open.
   ASSERT_THAT(stale_dir.Stat()->unix_inode(), Eq(stale_runtimes_0_inode));
+#endif
 
   // Now adjust their age backwards in time by two years to make them very, very
   // stale.
@@ -766,6 +779,13 @@ TEST_F(RuntimesCacheTest, LookupWithManyStaleRuntimes) {
       *cache_.Lookup({.target = "aarch64-unknown-unknown0"});
   runtimes2 = *cache_.Lookup({.target = "aarch64-unknown-unknown-fresh2"});
 
+#ifdef _WIN32
+  EXPECT_THAT(runtimes1.base_dir().Access(".marker"), IsSuccess(_));
+  EXPECT_THAT(runtimes2.base_dir().Access(".marker"), IsSuccess(_));
+  auto stale_marker = stale_runtimes_0.base_dir().Access(".marker");
+  ASSERT_FALSE(stale_marker.ok());
+  EXPECT_TRUE(stale_marker.error().no_entity());
+#else
   // The first and last should have been preserved as they were not stale.
   EXPECT_THAT(runtimes1.base_dir().Stat()->unix_inode(), Eq(runtimes1_inode));
   EXPECT_THAT(runtimes2.base_dir().Stat()->unix_inode(), Eq(runtimes2_inode));
@@ -776,6 +796,7 @@ TEST_F(RuntimesCacheTest, LookupWithManyStaleRuntimes) {
   // being freshly created, the directory would have the same inode.
   EXPECT_THAT(stale_runtimes_0.base_dir().Stat()->unix_inode(),
               Ne(stale_runtimes_0_inode));
+#endif
 }
 
 TEST_F(RuntimesCacheTest, LookupWithTooManyRuntimes) {
@@ -796,6 +817,16 @@ TEST_F(RuntimesCacheTest, LookupWithTooManyRuntimes) {
   auto stale_runtimes_n_2_target =
       llvm::formatv("aarch64-unknown-unknown{0}", n - 2).str();
 
+  Runtimes& stale_runtimes_n_2_orig = *std::prev(stale_runtimes.end(), 2);
+#ifdef _WIN32
+  runtimes1.base_dir().WriteFileFromString(".marker", "1").Check();
+  runtimes2.base_dir().WriteFileFromString(".marker", "2").Check();
+  stale_runtimes[0].base_dir().WriteFileFromString(".marker", "0").Check();
+  stale_runtimes.back().base_dir().WriteFileFromString(".marker", "n1").Check();
+  stale_runtimes_n_2_orig.base_dir()
+      .WriteFileFromString(".marker", "n2")
+      .Check();
+#else
   // Get the Unix-like inode of the directories so we can check whether
   // subsequent lookups create a new directory.
   auto runtimes1_inode = runtimes1.base_dir().Stat()->unix_inode();
@@ -808,7 +839,6 @@ TEST_F(RuntimesCacheTest, LookupWithTooManyRuntimes) {
   // For the n-2 stale runtime, get the inode but also open the underlying
   // directory so that the inode can't be reused even after pruning the runtime
   // below.
-  Runtimes& stale_runtimes_n_2_orig = *std::prev(stale_runtimes.end(), 2);
   auto stale_runtimes_n_2_inode =
       stale_runtimes_n_2_orig.base_dir().Stat()->unix_inode();
   Filesystem::Dir stale_dir =
@@ -816,6 +846,7 @@ TEST_F(RuntimesCacheTest, LookupWithTooManyRuntimes) {
   // Confirm that our extra open directory points to the some entity as the
   // runtimes has open.
   ASSERT_THAT(stale_dir.Stat()->unix_inode(), Eq(stale_runtimes_n_2_inode));
+#endif
 
   // Now manually set all the timestamps. We do this manually to avoid any
   // reliance on the clock behavior or the amount of time passing between lookup
@@ -850,6 +881,15 @@ TEST_F(RuntimesCacheTest, LookupWithTooManyRuntimes) {
   auto stale_runtimes_n_2 =
       *cache_.Lookup({.target = stale_runtimes_n_2_target});
 
+#ifdef _WIN32
+  EXPECT_THAT(runtimes1.base_dir().Access(".marker"), IsSuccess(_));
+  EXPECT_THAT(runtimes2.base_dir().Access(".marker"), IsSuccess(_));
+  EXPECT_THAT(stale_runtimes_0.base_dir().Access(".marker"), IsSuccess(_));
+  EXPECT_THAT(stale_runtimes_n_1.base_dir().Access(".marker"), IsSuccess(_));
+  auto pruned_marker = stale_runtimes_n_2.base_dir().Access(".marker");
+  ASSERT_FALSE(pruned_marker.ok());
+  EXPECT_TRUE(pruned_marker.error().no_entity());
+#else
   // The fresh runtimes should be preserved.
   EXPECT_THAT(runtimes1.base_dir().Stat()->unix_inode(), Eq(runtimes1_inode));
   EXPECT_THAT(runtimes2.base_dir().Stat()->unix_inode(), Eq(runtimes2_inode));
@@ -863,8 +903,8 @@ TEST_F(RuntimesCacheTest, LookupWithTooManyRuntimes) {
   // The next to last should have been pruned and re-created though.
   EXPECT_THAT(stale_runtimes_n_2.base_dir().Stat()->unix_inode(),
               Ne(stale_runtimes_n_2_inode));
-}
 #endif
+}
 
 }  // namespace
 }  // namespace Carbon

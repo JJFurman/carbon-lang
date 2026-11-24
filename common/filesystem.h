@@ -1099,9 +1099,11 @@ class DirRef {
                             bool is_cwd = false)
       : dir_path_(dir_path), is_cwd_(is_cwd) {}
 
-  // Resolves `path` relative to this directory.
-  auto ResolvePath(const std::filesystem::path& path) const
-      -> std::filesystem::path;
+  // Resolves `path` relative to this directory, rejecting empty paths and
+  // relative paths on invalid directory handles.
+  auto ResolvePath(const std::filesystem::path& path,
+                   llvm::StringLiteral format) const
+      -> ErrorOr<std::filesystem::path, PathError>;
 
   // Returns the directory path to display in error messages (empty for CWD).
   auto DirPathForError() const -> std::filesystem::path;

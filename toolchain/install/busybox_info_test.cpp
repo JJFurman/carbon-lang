@@ -34,6 +34,18 @@ class BusyboxInfoTest : public ::testing::Test {
                                                        &static_for_main_addr);
   }
 
+#ifdef _WIN32
+  auto SetUp() -> void override {
+    auto probe = dir_.Symlink(".symlink_probe", "target");
+    if (probe.ok()) {
+      dir_.Unlink(".symlink_probe").Check();
+    } else if (probe.error().access_denied()) {
+      GTEST_SKIP() << "Symlink creation requires Windows Developer Mode or "
+                      "elevated privileges.";
+    }
+  }
+#endif
+
   // Creates a synthetic install tree to test a batch of interactions.
   // Optionally accepts a symlink target for the busybox in the install tree.
   // Returns the input prefix for easy use.

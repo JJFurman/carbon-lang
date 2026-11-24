@@ -92,32 +92,50 @@ auto Runtimes::BuildImpl(Component component, Filesystem::Duration deadline,
   // directory once ready. Try and acquire an advisory lock to avoid redundant
   // computation.
   std::string_view component_path = ComponentPath(component);
-  CARBON_ASSIGN_OR_RETURN(
-      Filesystem::ReadWriteFile lock_file,
-      base_dir_.OpenReadWrite(
-          llvm::formatv(LockFileFormat, component_path).str(),
-          Filesystem::OpenAlways, /*creation_mode=*/0700));
-  CARBON_VLOG("PID {0} locking cache path: {1}\n",
-              llvm::sys::Process::getProcessId(),
-              (base_path_ / component_path).string());
+  Filesystem::ReadWriteFile lock_file;
   Filesystem::FileLock flock;
-  auto flock_result = lock_file.TryLock(Filesystem::FileLock::Exclusive,
-                                        deadline, poll_interval);
-  if (flock_result.ok()) {
-    flock = *std::move(flock_result);
-    CARBON_VLOG("Successfully locked cache path\n");
-    // As a debugging aid, write our PID into the lock file when we
-    // successfully acquire it. Ignore errors here though.
-    (void)lock_file.WriteFileFromString(
-        std::to_string(llvm::sys::Process::getProcessId()));
-  } else if (!flock_result.error().would_block()) {
-    // Some unexpected filesystem error, report that rather than trying to
-    // continue.
-    return std::move(flock_result).error();
+  auto lock_file_result = base_dir_.OpenReadWrite(
+      llvm::formatv(LockFileFormat, component_path).str(),
+      Filesystem::OpenAlways, /*creation_mode=*/0700);
+  if (lock_file_result.ok()) {
+    lock_file = *std::move(lock_file_result);
+    CARBON_VLOG("PID {0} locking cache path: {1}\n",
+                llvm::sys::Process::getProcessId(),
+                (base_path_ / component_path).string());
+    auto flock_result = lock_file.TryLock(Filesystem::FileLock::Exclusive,
+                                          deadline, poll_interval);
+    if (flock_result.ok()) {
+      flock = *std::move(flock_result);
+      CARBON_VLOG("Successfully locked cache path\n");
+      // As a debugging aid, write our PID into the lock file when we
+      // successfully acquire it. Ignore errors here though.
+      (void)lock_file.WriteFileFromString(
+          std::to_string(llvm::sys::Process::getProcessId()));
+    } else if (!flock_result.error().would_block()) {
+      // Some unexpected filesystem error, report that rather than trying to
+      // continue.
+      (void)std::move(lock_file).Close();
+      return std::move(flock_result).error();
+    } else {
+      auto holder = lock_file.ReadFileToString();
+      CARBON_VLOG("Unable to lock cache path, held by: {0}\n",
+                  holder.ok() ? *holder : std::string("<unknown>"));
+      (void)std::move(lock_file).Close();
+    }
   } else {
-    CARBON_VLOG("Unable to lock cache path, held by: {1}\n",
-                *lock_file.ReadFileToString());
-    (void)std::move(lock_file).Close();
+#ifdef _WIN32
+    // On NTFS, unlinking an open lock file places it in delete-pending state
+    // until all handles close, causing subsequent opens to fail with
+    // `access_denied`. Since this lock is advisory, proceed unlocked.
+    if (!lock_file_result.error().access_denied()) {
+      return std::move(lock_file_result).error();
+    }
+    CARBON_VLOG("Unable to open lock file for cache path '{0}': {1}\n",
+                (base_path_ / component_path).string(),
+                lock_file_result.error());
+#else
+    return std::move(lock_file_result).error();
+#endif
   }
 
   // See if another process has built the runtimes while we waited on the lock.
@@ -125,10 +143,12 @@ auto Runtimes::BuildImpl(Component component, Filesystem::Duration deadline,
   // ensure that a successful build atomically creates a viable directory.
   existing_result = Get(component);
   if (existing_result.ok()) {
-    // Clear and close the lock file.
-    (void)lock_file.WriteFileFromString("");
-    flock = {};
-    (void)std::move(lock_file).Close();
+    if (lock_file.is_valid()) {
+      // Clear and close the lock file.
+      (void)lock_file.WriteFileFromString("");
+      flock = {};
+      (void)std::move(lock_file).Close();
+    }
     return {*std::move(existing_result)};
   }
 
@@ -444,7 +464,13 @@ auto Runtimes::Cache::PruneStaleRuntimes(
       return false;
     }
 
-    // The lock is held, remove the entry.
+    // The lock is held, remove the entry. On Windows, unlock and close the
+    // lock file first because NTFS cannot remove a directory while a file
+    // inside it remains open.
+#ifdef _WIN32
+    *lock_result = {};
+    (void)std::move(lock_file).Close();
+#endif
     return rm_entry(name);
   };
 

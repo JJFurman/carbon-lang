@@ -40,6 +40,7 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/Process.h"
 #include "llvm/Support/WindowsError.h"
 
 namespace Carbon::Filesystem {
@@ -57,30 +58,60 @@ static auto HasAccessFlag(AccessCheckFlags flags, AccessCheckFlags bit)
   return (static_cast<int>(flags) & static_cast<int>(bit)) != 0;
 }
 
+// Resizes the file referred to by CRT descriptor `fd` to `new_size` without
+// changing the current file position.
+static auto ResizeFileByFd(int fd, int64_t new_size) -> std::error_code {
+  HANDLE handle = reinterpret_cast<HANDLE>(_get_osfhandle(fd));
+  if (handle == INVALID_HANDLE_VALUE) {
+    return std::make_error_code(std::errc::bad_file_descriptor);
+  }
+  FILE_END_OF_FILE_INFO eof_info = {};
+  eof_info.EndOfFile.QuadPart = new_size;
+  if (!::SetFileInformationByHandle(handle, FileEndOfFileInfo, &eof_info,
+                                    sizeof(eof_info))) {
+    return llvm::mapWindowsError(::GetLastError());
+  }
+  return {};
+}
+
 // Converts a UTF-8 path string to UTF-16, adding the `\\?\` extended-length
 // prefix when the resolved path exceeds `MAX_PATH`.
 static auto ToWidePath(llvm::StringRef path_utf8, std::wstring& out)
     -> std::error_code {
-  if (!llvm::ConvertUTF8toWide(path_utf8, out)) {
+  llvm::SmallString<256> path_str(path_utf8);
+  if (path_str.starts_with("//?/")) {
+    llvm::sys::path::native(path_str,
+                            llvm::sys::path::Style::windows_backslash);
+  }
+  if (!llvm::ConvertUTF8toWide(path_str, out)) {
     return std::make_error_code(std::errc::invalid_argument);
   }
-  if (out.size() < MAX_PATH || path_utf8.starts_with(R"(\\?\)")) {
+  if (path_str.starts_with(R"(\\?\)")) {
     return {};
   }
-  llvm::SmallString<256> abs_path(path_utf8);
-  if (std::error_code ec = llvm::sys::fs::make_absolute(abs_path)) {
+  size_t cur_dir_len = 0;
+  if (!llvm::sys::path::is_absolute(path_str)) {
+    cur_dir_len = ::GetCurrentDirectoryW(0, nullptr);
+    if (cur_dir_len == 0) {
+      return llvm::mapWindowsError(::GetLastError());
+    }
+  }
+  if (out.size() + cur_dir_len < MAX_PATH) {
+    return {};
+  }
+  if (std::error_code ec = llvm::sys::fs::make_absolute(path_str)) {
     return ec;
   }
-  llvm::sys::path::native(abs_path, llvm::sys::path::Style::windows_backslash);
-  llvm::sys::path::remove_dots(abs_path, /*remove_dot_dot=*/true,
+  llvm::sys::path::native(path_str, llvm::sys::path::Style::windows_backslash);
+  llvm::sys::path::remove_dots(path_str, /*remove_dot_dot=*/true,
                                llvm::sys::path::Style::windows_backslash);
   std::string prefixed;
-  if (abs_path.starts_with(R"(\\)")) {
+  if (path_str.starts_with(R"(\\)")) {
     prefixed = R"(\\?\UNC\)";
-    prefixed.append(abs_path.data() + 2, abs_path.size() - 2);
+    prefixed.append(path_str.data() + 2, path_str.size() - 2);
   } else {
     prefixed = R"(\\?\)";
-    prefixed.append(abs_path.data(), abs_path.size());
+    prefixed.append(path_str.data(), path_str.size());
   }
   if (!llvm::ConvertUTF8toWide(prefixed, out)) {
     return std::make_error_code(std::errc::invalid_argument);
@@ -119,7 +150,8 @@ auto PathError::Print(llvm::raw_ostream& out) const -> void {
 }
 
 auto FileLock::Destroy() -> void {
-  if (fd_ == -1) {
+  if (fd_ < 0) {
+    fd_ = -1;
     return;
   }
 
@@ -130,6 +162,10 @@ auto FileLock::Destroy() -> void {
 }
 
 auto Internal::FileRefBase::Stat() -> ErrorOr<FileStatus, FdError> {
+  if (fd_ < 0) {
+    return FdError(std::make_error_code(std::errc::bad_file_descriptor),
+                   "File::Stat on '{0}'", fd_);
+  }
   FileStatus status;
   if (std::error_code ec = llvm::sys::fs::status(fd_, status.status_)) {
     return FdError(ec, "File::Stat on '{0}'", fd_);
@@ -139,6 +175,12 @@ auto Internal::FileRefBase::Stat() -> ErrorOr<FileStatus, FdError> {
 
 auto Internal::FileRefBase::UpdateTimes(std::optional<TimePoint> time_point)
     -> ErrorOr<Success, FdError> {
+  if (fd_ < 0) {
+    return FdError(std::make_error_code(std::errc::bad_file_descriptor),
+                   time_point ? "File::UpdateTimes to a specific time on '{0}'"
+                              : "File::UpdateTimes to now on '{0}'",
+                   fd_);
+  }
   TimePoint target_time =
       time_point ? *time_point
                  : std::chrono::time_point_cast<Duration>(Clock::now());
@@ -200,8 +242,7 @@ auto Internal::FileRefBase::Truncate(int64_t new_size)
     return FdError(std::make_error_code(std::errc::invalid_argument),
                    "File::Truncate on '{0}'", fd_);
   }
-  if (std::error_code ec =
-          llvm::sys::fs::resize_file(fd_, static_cast<uint64_t>(new_size))) {
+  if (std::error_code ec = ResizeFileByFd(fd_, new_size)) {
     return FdError(ec, "File::Truncate on '{0}'", fd_);
   }
   return Success();
@@ -247,6 +288,10 @@ auto Internal::FileRefBase::WriteFromBuffer(llvm::ArrayRef<std::byte> buffer)
 auto Internal::FileRefBase::TryLock(FileLock::Kind kind, Duration deadline,
                                     Duration poll_interval)
     -> ErrorOr<FileLock, FdError> {
+  if (fd_ < 0) {
+    return FdError(std::make_error_code(std::errc::bad_file_descriptor),
+                   "File::TryLock on '{0}'", fd_);
+  }
   CARBON_CHECK(poll_interval <= deadline);
   if (deadline != Duration(0) && poll_interval == Duration(0)) {
     poll_interval =
@@ -296,9 +341,21 @@ auto Internal::FileRefBase::Close() && -> ErrorOr<Success, FdError> {
   return FdError(ErrnoToErrorCode(errno), "File::Close on '{0}'", fd);
 }
 
-auto DirRef::ResolvePath(const std::filesystem::path& path) const
-    -> std::filesystem::path {
-  if (is_cwd_ || path.is_absolute() || dir_path_ == nullptr) {
+auto DirRef::ResolvePath(const std::filesystem::path& path,
+                         llvm::StringLiteral format) const
+    -> ErrorOr<std::filesystem::path, PathError> {
+  if (path.empty()) {
+    return PathError(std::make_error_code(std::errc::no_such_file_or_directory),
+                     format, path, DirPathForError());
+  }
+  if (path.is_absolute()) {
+    return path;
+  }
+  if (!is_valid()) {
+    return PathError(std::make_error_code(std::errc::bad_file_descriptor),
+                     format, path, DirPathForError());
+  }
+  if (is_cwd_) {
     return path;
   }
   return *dir_path_ / path;
@@ -333,17 +390,19 @@ auto DirRef::Read() -> ErrorOr<Reader, FdError> {
 
 auto DirRef::Access(const std::filesystem::path& path, AccessCheckFlags check)
     -> ErrorOr<bool, PathError> {
-  std::string full = ResolvePath(path).string();
+  constexpr llvm::StringLiteral ErrorFormat =
+      "Dir::Access on '{0}' relative to '{1}'";
+  CARBON_ASSIGN_OR_RETURN(std::filesystem::path resolved,
+                          ResolvePath(path, ErrorFormat));
+  std::string full = resolved.string();
   if (std::error_code ec =
           llvm::sys::fs::access(full, llvm::sys::fs::AccessMode::Exist)) {
-    return PathError(ec, "Dir::Access on '{0}' relative to '{1}'", path,
-                     DirPathForError());
+    return PathError(ec, ErrorFormat, path, DirPathForError());
   }
   if (HasAccessFlag(check, AccessCheckFlags::Write)) {
     if (std::error_code ec =
             llvm::sys::fs::access(full, llvm::sys::fs::AccessMode::Write)) {
-      return PathError(ec, "Dir::Access on '{0}' relative to '{1}'", path,
-                       DirPathForError());
+      return PathError(ec, ErrorFormat, path, DirPathForError());
     }
   }
   if (HasAccessFlag(check, AccessCheckFlags::Execute)) {
@@ -353,8 +412,7 @@ auto DirRef::Access(const std::filesystem::path& path, AccessCheckFlags check)
     if (!llvm::sys::fs::is_directory(full)) {
       if (std::error_code ec =
               llvm::sys::fs::access(full, llvm::sys::fs::AccessMode::Execute)) {
-        return PathError(ec, "Dir::Access on '{0}' relative to '{1}'", path,
-                         DirPathForError());
+        return PathError(ec, ErrorFormat, path, DirPathForError());
       }
     }
   }
@@ -362,6 +420,10 @@ auto DirRef::Access(const std::filesystem::path& path, AccessCheckFlags check)
 }
 
 auto DirRef::Stat() -> ErrorOr<FileStatus, FdError> {
+  if (!is_valid()) {
+    return FdError(std::make_error_code(std::errc::bad_file_descriptor),
+                   "Dir::Stat on '{0}': ", DirPathForError());
+  }
   FileStatus status;
   std::string dir_str = is_cwd_ ? std::string(".") : dir_path_->string();
   if (std::error_code ec = llvm::sys::fs::status(dir_str, status.status_)) {
@@ -372,23 +434,29 @@ auto DirRef::Stat() -> ErrorOr<FileStatus, FdError> {
 
 auto DirRef::Stat(const std::filesystem::path& path)
     -> ErrorOr<FileStatus, PathError> {
+  constexpr llvm::StringLiteral ErrorFormat =
+      "Dir::Stat on '{0}' relative to '{1}'";
+  CARBON_ASSIGN_OR_RETURN(std::filesystem::path resolved,
+                          ResolvePath(path, ErrorFormat));
   FileStatus status;
   if (std::error_code ec = llvm::sys::fs::status(
-          ResolvePath(path).string(), status.status_, /*follow=*/true)) {
-    return PathError(ec, "Dir::Stat on '{0}' relative to '{1}'", path,
-                     DirPathForError());
+          resolved.string(), status.status_, /*follow=*/true)) {
+    return PathError(ec, ErrorFormat, path, DirPathForError());
   }
   return status;
 }
 
 auto DirRef::Lstat(const std::filesystem::path& path)
     -> ErrorOr<FileStatus, PathError> {
+  constexpr llvm::StringLiteral ErrorFormat =
+      "Dir::Lstat on '{0}' relative to '{1}'";
+  CARBON_ASSIGN_OR_RETURN(std::filesystem::path resolved,
+                          ResolvePath(path, ErrorFormat));
   FileStatus status;
-  std::string full = ResolvePath(path).string();
+  std::string full = resolved.string();
   if (std::error_code ec =
           llvm::sys::fs::status(full, status.status_, /*follow=*/false)) {
-    return PathError(ec, "Dir::Lstat on '{0}' relative to '{1}'", path,
-                     DirPathForError());
+    return PathError(ec, ErrorFormat, path, DirPathForError());
   }
   if (IsReparsePoint(full)) {
     llvm::SmallString<256> target;
@@ -403,28 +471,31 @@ auto DirRef::Lstat(const std::filesystem::path& path)
 auto DirRef::UpdateTimes(const std::filesystem::path& path,
                          std::optional<TimePoint> time_point)
     -> ErrorOr<Success, PathError> {
+  llvm::StringLiteral error_format =
+      time_point ? "Dir::UpdateTimes to a specific time on '{0}' relative "
+                   "to '{1}'"
+                 : "Dir::UpdateTimes to now on '{0}' relative to '{1}'";
+  CARBON_ASSIGN_OR_RETURN(std::filesystem::path resolved,
+                          ResolvePath(path, error_format));
   TimePoint target_time =
       time_point ? *time_point
                  : std::chrono::time_point_cast<Duration>(Clock::now());
   if (std::error_code ec = llvm::sys::fs::setLastAccessAndModificationTime(
-          ResolvePath(path).string(), target_time)) {
-    return PathError(
-        ec,
-        time_point ? "Dir::UpdateTimes to a specific time on '{0}' relative "
-                     "to '{1}'"
-                   : "Dir::UpdateTimes to now on '{0}' relative to '{1}'",
-        path, DirPathForError());
+          resolved.string(), target_time)) {
+    return PathError(ec, error_format, path, DirPathForError());
   }
   return Success();
 }
 
 auto DirRef::Readlink(const std::filesystem::path& path)
     -> ErrorOr<std::string, PathError> {
+  constexpr llvm::StringLiteral ErrorFormat =
+      "Dir::Readlink on '{0}' relative to '{1}'";
+  CARBON_ASSIGN_OR_RETURN(std::filesystem::path resolved,
+                          ResolvePath(path, ErrorFormat));
   llvm::SmallString<256> target;
-  if (std::error_code ec =
-          llvm::sys::fs::readlink(ResolvePath(path).string(), target)) {
-    return PathError(ec, "Dir::Readlink on '{0}' relative to '{1}'", path,
-                     DirPathForError());
+  if (std::error_code ec = llvm::sys::fs::readlink(resolved.string(), target)) {
+    return PathError(ec, ErrorFormat, path, DirPathForError());
   }
   return std::string(target);
 }
@@ -433,9 +504,19 @@ auto DirRef::OpenFileImpl(const std::filesystem::path& path, OpenAccess access,
                           CreationOptions creation_options,
                           ModeType creation_mode, OpenFlags flags)
     -> ErrorOr<int, PathError> {
-  std::string full = ResolvePath(path).string();
+  constexpr llvm::StringLiteral ErrorFormat =
+      "Dir::Open on '{0}' relative to '{1}'";
+  CARBON_ASSIGN_OR_RETURN(std::filesystem::path resolved,
+                          ResolvePath(path, ErrorFormat));
+  std::string full = resolved.string();
   bool has_truncate = HasFlag(flags, OpenFlags::Truncate);
   bool has_append = HasFlag(flags, OpenFlags::Append);
+
+  if (HasFlag(flags, OpenFlags::NoFollow) && IsReparsePoint(full)) {
+    return PathError(
+        std::make_error_code(std::errc::too_many_symbolic_link_levels),
+        ErrorFormat, path, DirPathForError());
+  }
 
   llvm::sys::fs::FileAccess llvm_access = llvm::sys::fs::FA_Read;
   switch (access) {
@@ -470,17 +551,20 @@ auto DirRef::OpenFileImpl(const std::filesystem::path& path, OpenAccess access,
   }
 
   bool existed_before =
-      creation_options == OpenAlways && llvm::sys::fs::exists(full);
+      (creation_options == OpenAlways || creation_options == CreateAlways) &&
+      llvm::sys::fs::exists(full);
 
   llvm::Expected<llvm::sys::fs::file_t> handle = llvm::sys::fs::openNativeFile(
       full, disp, llvm_access, llvm::sys::fs::OF_None, creation_mode);
   if (!handle) {
-    return PathError(llvm::errorToErrorCode(handle.takeError()),
-                     "Dir::Open on '{0}' relative to '{1}'", path,
-                     DirPathForError());
+    return PathError(llvm::errorToErrorCode(handle.takeError()), ErrorFormat,
+                     path, DirPathForError());
   }
 
   int crt_flags = _O_BINARY;
+  if (access == OpenAccess::ReadOnly) {
+    crt_flags |= _O_RDONLY;
+  }
   if (has_append) {
     crt_flags |= _O_APPEND;
   }
@@ -490,13 +574,12 @@ auto DirRef::OpenFileImpl(const std::filesystem::path& path, OpenAccess access,
     int errnum = errno;
     llvm::sys::fs::file_t f = *handle;
     (void)llvm::sys::fs::closeFile(f);
-    return PathError(ErrnoToErrorCode(errnum),
-                     "Dir::Open on '{0}' relative to '{1}'", path,
+    return PathError(ErrnoToErrorCode(errnum), ErrorFormat, path,
                      DirPathForError());
   }
 
   if (truncate_after_open) {
-    if (std::error_code ec = llvm::sys::fs::resize_file(fd, 0)) {
+    if (std::error_code ec = ResizeFileByFd(fd, 0)) {
       _close(fd);
       return PathError(ec, "Dir::Open truncate on '{0}' relative to '{1}'",
                        path, DirPathForError());
@@ -504,9 +587,10 @@ auto DirRef::OpenFileImpl(const std::filesystem::path& path, OpenAccess access,
   }
 
   // Apply read-only attribute if the file was newly created without write bits.
-  bool created = creation_options == CreateNew ||
-                 creation_options == CreateAlways ||
-                 (creation_options == OpenAlways && !existed_before);
+  bool created =
+      creation_options == CreateNew ||
+      ((creation_options == OpenAlways || creation_options == CreateAlways) &&
+       !existed_before);
   if (created && (creation_mode & 0222) == 0) {
     (void)llvm::sys::fs::setPermissions(
         full, static_cast<llvm::sys::fs::perms>(creation_mode));
@@ -518,7 +602,11 @@ auto DirRef::OpenFileImpl(const std::filesystem::path& path, OpenAccess access,
 auto DirRef::OpenDir(const std::filesystem::path& path,
                      CreationOptions creation_options, ModeType creation_mode,
                      OpenFlags open_flags) -> ErrorOr<Dir, PathError> {
-  std::string full = ResolvePath(path).string();
+  constexpr llvm::StringLiteral ErrorFormat =
+      "Opening directory '{0}' relative to '{1}' during DirRef::OpenDir";
+  CARBON_ASSIGN_OR_RETURN(std::filesystem::path resolved,
+                          ResolvePath(path, ErrorFormat));
+  std::string full = resolved.string();
 
   if (creation_options != OpenExisting) {
     CARBON_CHECK(creation_options != CreateAlways,
@@ -541,21 +629,15 @@ auto DirRef::OpenDir(const std::filesystem::path& path,
   if (!follow && IsReparsePoint(full)) {
     return PathError(
         std::make_error_code(std::errc::too_many_symbolic_link_levels),
-        "Opening directory '{0}' relative to '{1}' during DirRef::OpenDir",
-        path, DirPathForError());
+        ErrorFormat, path, DirPathForError());
   }
   llvm::sys::fs::file_status st;
   if (std::error_code ec = llvm::sys::fs::status(full, st, follow)) {
-    return PathError(ec,
-                     "Opening directory '{0}' relative to '{1}' during "
-                     "DirRef::OpenDir",
-                     path, DirPathForError());
+    return PathError(ec, ErrorFormat, path, DirPathForError());
   }
   if (!llvm::sys::fs::is_directory(st)) {
     return PathError(std::make_error_code(std::errc::not_a_directory),
-                     "Opening directory '{0}' relative to '{1}' during "
-                     "DirRef::OpenDir",
-                     path, DirPathForError());
+                     ErrorFormat, path, DirPathForError());
   }
 
   // Resolve to an absolute path so the opened `Dir` remains stable across
@@ -574,8 +656,16 @@ auto DirRef::OpenDir(const std::filesystem::path& path,
 auto DirRef::Rename(const std::filesystem::path& path, DirRef target_dir,
                     const std::filesystem::path& target_path)
     -> ErrorOr<Success, PathError> {
-  std::string from = ResolvePath(path).string();
-  std::string to = target_dir.ResolvePath(target_path).string();
+  constexpr llvm::StringLiteral ErrorFormat =
+      "Dir::Rename on '{0}' relative to '{1}'";
+  CARBON_ASSIGN_OR_RETURN(std::filesystem::path resolved_from,
+                          ResolvePath(path, ErrorFormat));
+  CARBON_ASSIGN_OR_RETURN(
+      std::filesystem::path resolved_to,
+      target_dir.ResolvePath(target_path,
+                             "Dir::Rename target '{0}' relative to '{1}'"));
+  std::string from = resolved_from.string();
+  std::string to = resolved_to.string();
   if (std::error_code ec = llvm::sys::fs::rename(from, to)) {
     // On Windows, renaming a directory over an existing directory fails with
     // `permission_denied` rather than `directory_not_empty`. Normalize that so
@@ -585,8 +675,7 @@ auto DirRef::Rename(const std::filesystem::path& path, DirRef target_dir,
         llvm::sys::fs::is_directory(from) && llvm::sys::fs::is_directory(to)) {
       ec = std::make_error_code(std::errc::directory_not_empty);
     }
-    return PathError(ec, "Dir::Rename on '{0}' relative to '{1}'", path,
-                     DirPathForError());
+    return PathError(ec, ErrorFormat, path, DirPathForError());
   }
   return Success();
 }
@@ -608,47 +697,53 @@ auto DirRef::Chdir() -> ErrorOr<Success, FdError> {
 
 auto DirRef::Chdir(const std::filesystem::path& path)
     -> ErrorOr<Success, PathError> {
-  std::string full = ResolvePath(path).string();
+  constexpr llvm::StringLiteral ErrorFormat =
+      "Dir::Chdir on '{0}' relative to '{1}'";
+  CARBON_ASSIGN_OR_RETURN(std::filesystem::path resolved,
+                          ResolvePath(path, ErrorFormat));
+  std::string full = resolved.string();
   llvm::sys::fs::file_status st;
   if (std::error_code ec = llvm::sys::fs::status(full, st)) {
-    return PathError(ec, "Dir::Chdir on '{0}' relative to '{1}'", path,
-                     DirPathForError());
+    return PathError(ec, ErrorFormat, path, DirPathForError());
   }
   if (!llvm::sys::fs::is_directory(st)) {
     return PathError(std::make_error_code(std::errc::not_a_directory),
-                     "Dir::Chdir on '{0}' relative to '{1}'", path,
-                     DirPathForError());
+                     ErrorFormat, path, DirPathForError());
   }
   if (std::error_code ec = llvm::sys::fs::set_current_path(full)) {
-    return PathError(ec, "Dir::Chdir on '{0}' relative to '{1}'", path,
-                     DirPathForError());
+    return PathError(ec, ErrorFormat, path, DirPathForError());
   }
   return Success();
 }
 
 auto DirRef::Symlink(const std::filesystem::path& path,
                      const std::string& target) -> ErrorOr<Success, PathError> {
+  constexpr llvm::StringLiteral ErrorFormat =
+      "Dir::Symlink on '{0}' relative to '{1}'";
+  CARBON_ASSIGN_OR_RETURN(std::filesystem::path resolved,
+                          ResolvePath(path, ErrorFormat));
   // Match POSIX semantics: ignore everything after the first embedded null.
-  if (std::error_code ec = llvm::sys::fs::create_symlink(
-          target.c_str(), ResolvePath(path).string())) {
-    return PathError(ec, "Dir::Symlink on '{0}' relative to '{1}'", path,
-                     DirPathForError());
+  if (std::error_code ec =
+          llvm::sys::fs::create_symlink(target.c_str(), resolved.string())) {
+    return PathError(ec, ErrorFormat, path, DirPathForError());
   }
   return Success();
 }
 
 auto DirRef::Unlink(const std::filesystem::path& path)
     -> ErrorOr<Success, PathError> {
-  std::string full = ResolvePath(path).string();
+  constexpr llvm::StringLiteral ErrorFormat =
+      "Dir::Unlink on '{0}' relative to '{1}'";
+  CARBON_ASSIGN_OR_RETURN(std::filesystem::path resolved,
+                          ResolvePath(path, ErrorFormat));
+  std::string full = resolved.string();
   std::wstring wide_path;
   if (std::error_code ec = ToWidePath(full, wide_path)) {
-    return PathError(ec, "Dir::Unlink on '{0}' relative to '{1}'", path,
-                     DirPathForError());
+    return PathError(ec, ErrorFormat, path, DirPathForError());
   }
   DWORD attrs = ::GetFileAttributesW(wide_path.c_str());
   if (attrs == INVALID_FILE_ATTRIBUTES) {
-    return PathError(llvm::mapWindowsError(::GetLastError()),
-                     "Dir::Unlink on '{0}' relative to '{1}'", path,
+    return PathError(llvm::mapWindowsError(::GetLastError()), ErrorFormat, path,
                      DirPathForError());
   }
   // `Unlink` must not remove non-symlink directories (callers such as `Rmtree`
@@ -656,8 +751,7 @@ auto DirRef::Unlink(const std::filesystem::path& path)
   if ((attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
       (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
     return PathError(std::make_error_code(std::errc::is_a_directory),
-                     "Dir::Unlink on '{0}' relative to '{1}'", path,
-                     DirPathForError());
+                     ErrorFormat, path, DirPathForError());
   }
   // Windows refuses to delete read-only files unless the read-only attribute is
   // cleared first.
@@ -668,27 +762,28 @@ auto DirRef::Unlink(const std::filesystem::path& path)
   }
   if (std::error_code ec =
           llvm::sys::fs::remove(full, /*IgnoreNonExisting=*/false)) {
-    return PathError(ec, "Dir::Unlink on '{0}' relative to '{1}'", path,
-                     DirPathForError());
+    return PathError(ec, ErrorFormat, path, DirPathForError());
   }
   return Success();
 }
 
 auto DirRef::Rmdir(const std::filesystem::path& path)
     -> ErrorOr<Success, PathError> {
-  std::string full = ResolvePath(path).string();
+  constexpr llvm::StringLiteral ErrorFormat =
+      "Dir::Rmdir on '{0}' relative to '{1}'";
+  CARBON_ASSIGN_OR_RETURN(std::filesystem::path resolved,
+                          ResolvePath(path, ErrorFormat));
+  std::string full = resolved.string();
   std::wstring wide_path;
   if (std::error_code ec = ToWidePath(full, wide_path)) {
-    return PathError(ec, "Dir::Rmdir on '{0}' relative to '{1}'", path,
-                     DirPathForError());
+    return PathError(ec, ErrorFormat, path, DirPathForError());
   }
   if (!::RemoveDirectoryW(wide_path.c_str())) {
     DWORD err = ::GetLastError();
     std::error_code ec = err == ERROR_DIRECTORY
                              ? std::make_error_code(std::errc::not_a_directory)
                              : llvm::mapWindowsError(err);
-    return PathError(ec, "Dir::Rmdir on '{0}' relative to '{1}'", path,
-                     DirPathForError());
+    return PathError(ec, ErrorFormat, path, DirPathForError());
   }
   return Success();
 }
@@ -757,20 +852,35 @@ auto MakeTmpDir() -> ErrorOr<RemovingDir, Error> {
 
 auto MakeTmpDirWithPrefix(std::filesystem::path prefix)
     -> ErrorOr<RemovingDir, Error> {
-  llvm::SmallString<256> result_path;
-  if (std::error_code ec =
-          llvm::sys::fs::createUniqueDirectory(prefix.string(), result_path)) {
-    return Error(llvm::formatv("Calling createUniqueDirectory on '{0}' "
-                               "failed: {1}",
-                               prefix.string(), ec.message())
-                     .str());
+  constexpr int MaxAttempts = 128;
+  constexpr char HexDigits[] = "0123456789abcdef";
+  std::string prefix_str = prefix.string();
+  std::string candidate;
+  std::error_code last_ec;
+  for (int attempt = 0; attempt < MaxAttempts; ++attempt) {
+    uint32_t rand_val = llvm::sys::Process::GetRandomNumber();
+    candidate = prefix_str;
+    candidate.push_back('.');
+    for (int i = 0; i < 6; ++i) {
+      candidate.push_back(HexDigits[(rand_val >> (i * 4)) & 0xf]);
+    }
+    last_ec = llvm::sys::fs::create_directory(candidate,
+                                              /*IgnoreExisting=*/false);
+    if (!last_ec) {
+      std::filesystem::path tmpdir_path(candidate);
+      CARBON_ASSIGN_OR_RETURN(
+          Dir tmp, Cwd().OpenDir(tmpdir_path, OpenExisting, /*creation_mode=*/0,
+                                 OpenFlags::NoFollow));
+      return RemovingDir(std::move(tmp), std::move(tmpdir_path));
+    }
+    if (last_ec != std::errc::file_exists) {
+      break;
+    }
   }
-
-  std::filesystem::path tmpdir_path(std::string(result_path));
-  CARBON_ASSIGN_OR_RETURN(
-      Dir tmp, Cwd().OpenDir(tmpdir_path, OpenExisting, /*creation_mode=*/0,
-                             OpenFlags::NoFollow));
-  return RemovingDir(std::move(tmp), std::move(tmpdir_path));
+  return Error(llvm::formatv("Creating temporary directory with prefix '{0}' "
+                             "failed: {1}",
+                             prefix_str, last_ec.message())
+                   .str());
 }
 
 }  // namespace Carbon::Filesystem

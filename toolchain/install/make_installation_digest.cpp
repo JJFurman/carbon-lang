@@ -85,12 +85,13 @@ auto DigestProgram::Run(int argc, char** argv) -> ErrorOr<int> {
 
   // Walk all the install data files in the manifest.
   for (llvm::StringRef manifest_line : manifest_lines) {
+    manifest_line = manifest_line.trim();
     if (manifest_line.empty()) {
       continue;
     }
     // Compute the full path and installed path for each file. The installed
     // path comes from the path components below the `prefix` component.
-    std::filesystem::path full_path = manifest_line.trim().str();
+    std::filesystem::path full_path = manifest_line.str();
     std::filesystem::path install_path;
     bool append = false;
     for (const auto& component : full_path) {
