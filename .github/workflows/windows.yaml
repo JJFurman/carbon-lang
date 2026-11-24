@@ -152,7 +152,9 @@ jobs:
           # uses OpenSSL).
           git config --global http.schannelCheckRevoke false
 
-          if (-not (Get-Command bazelisk -ErrorAction SilentlyContinue)) {
+          # Prefer a native `bazelisk.exe` over npm's `bazelisk.ps1` wrapper so
+          # PowerShell does not intercept arguments such as `--`.
+          if (-not (Get-Command bazelisk.exe -ErrorAction SilentlyContinue)) {
             $bazeliskDir = Join-Path $env:RUNNER_TEMP 'bazelisk'
             New-Item -ItemType Directory -Force -Path $bazeliskDir | Out-Null
             $bazeliskExe = Join-Path $bazeliskDir 'bazelisk.exe'
@@ -174,7 +176,7 @@ jobs:
           Write-Host '*** lld-link'
           & (Join-Path $llvmBin 'lld-link.exe') --version
           Write-Host '*** bazelisk'
-          bazelisk --version
+          bazelisk.exe --version
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           if (Test-Path $vswhere) {
             Write-Host '*** Visual Studio'
@@ -214,7 +216,7 @@ jobs:
           build --verbose_failures
           test --test_output=errors
           "@ | Set-Content -Path user.bazelrc -Encoding utf8
-          bazelisk info
+          bazelisk.exe info
 
       - name: Build carbon-busybox
         if: steps.filter.outputs.has_code == 'true'
@@ -222,15 +224,13 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          bazelisk build --keep_going //toolchain/install:carbon-busybox //toolchain/install:carbon_cc_toolchain_config_for_install
+          bazelisk.exe build --keep_going //toolchain/install:carbon-busybox //toolchain/install:carbon_cc_toolchain_config_for_install
 
       - name: Run carbon-busybox --version
         if: steps.filter.outputs.has_code == 'true'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          bazelisk run //toolchain/install:carbon-busybox -- --version
+        # Use cmd so PowerShell does not consume the `--` argument separator.
+        shell: cmd
+        run: bazelisk.exe run //toolchain/install:carbon-busybox -- --version
 
       - name: Run filesystem_test
         if: steps.filter.outputs.has_code == 'true'
@@ -238,15 +238,15 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          bazelisk test //common:filesystem_test
+          bazelisk.exe test //common:filesystem_test
 
       - name: Shut down Bazel before saving cache
         id: shutdown-bazel
         if: always() && steps.filter.outputs.has_code == 'true'
         shell: pwsh
         run: |
-          if (Get-Command bazelisk -ErrorAction SilentlyContinue) {
-            bazelisk shutdown
+          if (Get-Command bazelisk.exe -ErrorAction SilentlyContinue) {
+            bazelisk.exe shutdown
           }
           if (Test-Path (Join-Path $env:LLVM_DIR 'bin\clang-cl.exe')) {
             Add-Content -Path $env:GITHUB_OUTPUT -Value 'has_llvm=true'
