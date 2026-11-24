@@ -522,6 +522,7 @@ cc_library(
         "//common:string_helpers",
         "//common:vlog",
         "//toolchain/base:install_paths",
+        "@llvm-project//lld:COFF",
         "@llvm-project//lld:Common",
         "@llvm-project//lld:ELF",
         "@llvm-project//lld:MachO",

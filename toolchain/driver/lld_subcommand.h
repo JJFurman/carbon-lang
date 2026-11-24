@@ -24,6 +24,7 @@ struct LldOptions {
   // subcommand which is a subset of those recognized by the LLVM triple
   // infrastructure.
   enum class Platform {
+    Coff,
     Elf,
     MachO,
   };

@@ -70,13 +70,15 @@ class InstallPathsTest : public ::testing::Test {
     ASSERT_THAT(llvm_bin_path.string(), StartsWith(root_path.string()));
     auto open_result = Filesystem::Cwd().OpenDir(llvm_bin_path);
     ASSERT_THAT(open_result, IsSuccess(_));
-    Filesystem::Dir llvm_bin = *std::move(open_result);
 
-    for (std::filesystem::path bin_name : {"ld.lld", "ld64.lld"}) {
-      EXPECT_THAT(
-          llvm_bin.Access(bin_name, Filesystem::AccessCheckFlags::Execute),
-          IsSuccess(Eq(true)))
-          << "path: " << (llvm_bin_path / bin_name);
+    for (const std::filesystem::path& bin_path :
+         {paths.clang_path(), paths.ld_lld_path(), paths.ld64_lld_path(),
+          paths.lld_link_path(), paths.llvm_tool_path(LLVMTool::Symbolizer)}) {
+      ASSERT_THAT(bin_path.string(), StartsWith(llvm_bin_path.string()));
+      EXPECT_THAT(Filesystem::Cwd().Access(
+                      bin_path, Filesystem::AccessCheckFlags::Execute),
+                  IsSuccess(Eq(true)))
+          << "path: " << bin_path;
     }
   }
 
@@ -84,8 +86,13 @@ class InstallPathsTest : public ::testing::Test {
 };
 
 TEST_F(InstallPathsTest, RootBusybox) {
+#ifdef _WIN32
+  std::string installed_busybox_path =
+      test_runfiles_->Rlocation("carbon/toolchain/install/carbon-busybox.exe");
+#else
   std::string installed_busybox_path =
       test_runfiles_->Rlocation("carbon/toolchain/install/carbon-busybox");
+#endif
 
   auto paths = InstallPaths::MakeExeRelative(installed_busybox_path);
   ASSERT_THAT(paths.error(), Eq(std::nullopt)) << *paths.error();
@@ -112,8 +119,13 @@ TEST_F(InstallPathsTest, TestRunfiles) {
 }
 
 TEST_F(InstallPathsTest, BinaryRunfiles) {
+#ifdef _WIN32
+  std::filesystem::path test_binary_path =
+      test_runfiles_->Rlocation("carbon/toolchain/base/test_binary.exe");
+#else
   std::filesystem::path test_binary_path =
       test_runfiles_->Rlocation("carbon/toolchain/base/test_binary");
+#endif
   ASSERT_THAT(Filesystem::Cwd().Access(test_binary_path,
                                        Filesystem::AccessCheckFlags::Execute),
               IsSuccess(Eq(true)))

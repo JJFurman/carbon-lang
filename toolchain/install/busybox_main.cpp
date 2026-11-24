@@ -42,22 +42,24 @@ static auto Main(int argc, char** argv) -> ErrorOr<int> {
   // If `LLVM_SYMBOLIZER_PATH` is unset, sets it. Signals.cpp would do some more
   // path resolution which this overrides in favor of using the busybox itself
   // for symbolization.
-  SetEnv(
-      "LLVM_SYMBOLIZER_PATH",
-      (install_paths.llvm_install_bin() / "llvm-symbolizer").string().c_str(),
-      /*overwrite=*/false);
+  SetEnv("LLVM_SYMBOLIZER_PATH",
+         install_paths.llvm_tool_path(LLVMTool::Symbolizer).string().c_str(),
+         /*overwrite=*/false);
 
   auto fs = llvm::vfs::getRealFileSystem();
 
   llvm::SmallVector<const char*> raw_args;
   raw_args.append(argv + 1, argv + argc);
 
-  // Expand any response files in the arguments.
+  // Expand any response files in the arguments, except for `lld-link`, which
+  // expands response files itself using Windows quoting by default.
   llvm::BumpPtrAllocator alloc;
-  if (llvm::Error error = clang::driver::expandResponseFiles(
-          raw_args, busybox_info.mode && *busybox_info.mode == "clang-cl",
-          alloc, fs.get())) {
-    return Error(llvm::toString(std::move(error)));
+  if (!busybox_info.mode || *busybox_info.mode != "lld-link") {
+    if (llvm::Error error = clang::driver::expandResponseFiles(
+            raw_args, busybox_info.mode && *busybox_info.mode == "clang-cl",
+            alloc, fs.get())) {
+      return Error(llvm::toString(std::move(error)));
+    }
   }
 
   llvm::SmallVector<llvm::StringRef> args;
@@ -85,6 +87,7 @@ static auto Main(int argc, char** argv) -> ErrorOr<int> {
             // platform flags.
             .Case("ld.lld", {"lld", "--platform=gnu", "--"})
             .Case("ld64.lld", {"lld", "--platform=darwin", "--"})
+            .Case("lld-link", {"lld", "--platform=coff", "--"})
 
     // We also support a number of LLVM tools with a trivial translation
     // to subcommands. If any of these end up needing more advanced

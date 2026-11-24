@@ -113,6 +113,7 @@ class InstallPaths {
   auto lld_path() const -> std::filesystem::path;
   auto ld_lld_path() const -> std::filesystem::path;
   auto ld64_lld_path() const -> std::filesystem::path;
+  auto lld_link_path() const -> std::filesystem::path;
 
   // The path to any of the LLVM tools.
   auto llvm_tool_path(LLVMTool tool) const -> std::filesystem::path;

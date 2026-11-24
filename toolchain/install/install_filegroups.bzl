@@ -14,11 +14,12 @@ _clang_aliases = [
     "clang-cpp",
 ]
 
-# TODO: Add remaining aliases of LLD for Windows and WASM when we have support
-# for them wired up through the busybox.
+# TODO: Add remaining aliases of LLD for WASM when we have support for them
+# wired up through the busybox.
 _lld_aliases = [
     "ld.lld",
     "ld64.lld",
+    "lld-link",
 ]
 
 _llvm_binaries = _clang_aliases + _lld_aliases + [
@@ -33,7 +34,9 @@ _llvm_binaries = _clang_aliases + _lld_aliases + [
 def _toolchain_llvm_binaries_impl(ctx):
     outputs = []
     for bin in _llvm_binaries:
-        out = ctx.actions.declare_file(ctx.attr.prefix + "llvm/bin/" + bin)
+        out = ctx.actions.declare_file(
+            ctx.attr.prefix + "llvm/bin/" + bin + ctx.attr.exe_extension,
+        )
         ctx.actions.symlink(
             output = out,
             target_file = ctx.files.carbon_binary[0],
@@ -43,7 +46,7 @@ def _toolchain_llvm_binaries_impl(ctx):
     return [DefaultInfo(files = depset(direct = outputs))]
 
 toolchain_llvm_binaries = rule(
-    doc = "Creates symlinks for LLVM binaries pointing to a single Carbon binary.",
+    doc = "Creates LLVM tool binaries backed by a single Carbon busybox or launcher binary.",
     implementation = _toolchain_llvm_binaries_impl,
     attrs = {
         "carbon_binary": attr.label(
@@ -52,6 +55,7 @@ toolchain_llvm_binaries = rule(
             mandatory = True,
             #cfg = None,
         ),
+        "exe_extension": attr.string(default = ""),
         "prefix": attr.string(default = ""),
     },
 )
@@ -170,7 +174,13 @@ def filtered_toolchain_files(name, prefix, remove_prefix, srcs_groups):
             filter_to_srcs_prefix = remove_prefix,
         )
 
-def toolchain_pkg_filegroup(name, carbon_busybox, srcs, tags = []):
+def toolchain_pkg_filegroup(
+        name,
+        carbon_busybox,
+        srcs,
+        busybox_launcher = None,
+        llvm_bins = None,
+        tags = []):
     """Given a CMake-style install prefix[1], the hierarchy looks like:
 
     - prefix/bin: Binaries intended for direct use.
@@ -205,6 +215,7 @@ def toolchain_pkg_filegroup(name, carbon_busybox, srcs, tags = []):
     )
     pkg_srcs.append(":" + name + "_srcs")
 
+    unix_symlinks = []
     for bin in _llvm_binaries:
         pkg_mklink(
             name = name + "_llvm_symlink_" + bin,
@@ -212,7 +223,7 @@ def toolchain_pkg_filegroup(name, carbon_busybox, srcs, tags = []):
             target = "../../carbon-busybox",
             tags = tags,
         )
-        pkg_srcs.append(":" + name + "_llvm_symlink_" + bin)
+        unix_symlinks.append(":" + name + "_llvm_symlink_" + bin)
 
     pkg_mklink(
         name = name + "_bin_symlink",
@@ -220,6 +231,37 @@ def toolchain_pkg_filegroup(name, carbon_busybox, srcs, tags = []):
         target = "../lib/carbon/carbon-busybox",
         tags = tags,
     )
-    pkg_srcs.append(":" + name + "_bin_symlink")
+    unix_symlinks.append(":" + name + "_bin_symlink")
 
-    pkg_filegroup(name = name, srcs = pkg_srcs, tags = tags)
+    if busybox_launcher != None and llvm_bins != None:
+        pkg_files(
+            name = name + "_win_bin_launcher",
+            srcs = [busybox_launcher],
+            renames = {busybox_launcher: "carbon.exe"},
+            prefix = "bin",
+            attributes = pkg_attributes(mode = "0755"),
+            target_compatible_with = ["@platforms//os:windows"],
+            tags = tags,
+        )
+        pkg_files(
+            name = name + "_win_llvm_bins",
+            srcs = [llvm_bins],
+            prefix = "lib/carbon",
+            strip_prefix = strip_prefix.from_pkg(),
+            attributes = pkg_attributes(mode = "0755"),
+            target_compatible_with = ["@platforms//os:windows"],
+            tags = tags,
+        )
+        pkg_filegroup(
+            name = name,
+            srcs = pkg_srcs + select({
+                "@platforms//os:windows": [
+                    ":" + name + "_win_bin_launcher",
+                    ":" + name + "_win_llvm_bins",
+                ],
+                "//conditions:default": unix_symlinks,
+            }),
+            tags = tags,
+        )
+    else:
+        pkg_filegroup(name = name, srcs = pkg_srcs + unix_symlinks, tags = tags)
