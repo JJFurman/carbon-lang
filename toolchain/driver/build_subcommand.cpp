@@ -9,6 +9,7 @@
 #include "common/filesystem.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/TargetParser/Triple.h"
 #include "toolchain/driver/compile_driver.h"
 #include "toolchain/driver/link_driver.h"
 
@@ -112,7 +113,9 @@ auto BuildSubcommand::Run(DriverEnv& driver_env) -> DriverResult {
     output_filename = llvm::sys::path::filename(
         compile_driver.units()[compile_driver.first_input_index()]
             ->input_filename());
-    llvm::sys::path::replace_extension(output_filename, "");
+    llvm::Triple target_triple(options_.codegen_options.target);
+    llvm::sys::path::replace_extension(
+        output_filename, target_triple.isOSWindows() ? ".exe" : "");
     options_.link_options.output_filename = output_filename;
   }
 

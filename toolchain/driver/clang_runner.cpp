@@ -146,7 +146,8 @@ static auto IsNonLinkCommand(llvm::ArrayRef<llvm::StringRef> args) -> bool {
     // since it's fine to have false negatives.
     return arg == "-c" || arg == "-E" || arg == "-S" ||
            arg == "-fsyntax-only" || arg == "--version" || arg == "--help" ||
-           arg == "/?" || arg == "--driver-mode=cpp";
+           arg == "/?" || arg == "/c" || arg == "/E" || arg == "/P" ||
+           arg == "/Zs" || arg == "--driver-mode=cpp";
   });
 }
 
@@ -188,11 +189,15 @@ auto ClangRunner::RunWithPrebuiltRuntimes(llvm::ArrayRef<llvm::StringRef> args,
   }
 
   std::string target = ComputeClangTarget(args);
+  llvm::Triple target_triple(target);
 
   CARBON_ASSIGN_OR_RETURN(std::filesystem::path prebuilt_resource_dir_path,
                           prebuilt_runtimes.Get(Runtimes::ClangResourceDir));
-  CARBON_ASSIGN_OR_RETURN(std::filesystem::path libunwind_path,
-                          prebuilt_runtimes.Get(Runtimes::LibUnwind));
+  std::optional<std::filesystem::path> libunwind_path;
+  if (!target_triple.isKnownWindowsMSVCEnvironment()) {
+    CARBON_ASSIGN_OR_RETURN(libunwind_path,
+                            prebuilt_runtimes.Get(Runtimes::LibUnwind));
+  }
   CARBON_ASSIGN_OR_RETURN(std::filesystem::path libcxx_path,
                           prebuilt_runtimes.Get(Runtimes::Libcxx));
   return RunInternal(args, target, std::move(prebuilt_resource_dir_path),
@@ -232,17 +237,25 @@ auto ClangRunner::Run(llvm::ArrayRef<llvm::StringRef> args,
   // requires a temporary directory as well as the destination directory for
   // the build. The temporary directory should only be used during the build,
   // not once we are running Clang with the built runtime.
+  llvm::Triple target_triple(features.target);
   CARBON_VLOG("Building target resource dir...\n");
   ClangResourceDirBuilder builder(this, &runtimes_build_thread_pool, &runtimes,
                                   features);
-  ClangArchiveRuntimesBuilder<Runtimes::LibUnwind> lib_unwind_builder(
-      this, &runtimes_build_thread_pool, &runtimes, features);
+  std::optional<ClangArchiveRuntimesBuilder<Runtimes::LibUnwind>>
+      lib_unwind_builder;
+  if (!target_triple.isKnownWindowsMSVCEnvironment()) {
+    lib_unwind_builder.emplace(this, &runtimes_build_thread_pool, &runtimes,
+                               features);
+  }
   ClangArchiveRuntimesBuilder<Runtimes::Libcxx> libcxx_builder(
       this, &runtimes_build_thread_pool, &runtimes, features);
   CARBON_ASSIGN_OR_RETURN(std::filesystem::path resource_dir_path,
                           std::move(builder).Wait());
-  CARBON_ASSIGN_OR_RETURN(std::filesystem::path libunwind_path,
-                          std::move(lib_unwind_builder).Wait());
+  std::optional<std::filesystem::path> libunwind_path;
+  if (lib_unwind_builder) {
+    CARBON_ASSIGN_OR_RETURN(libunwind_path,
+                            std::move(*lib_unwind_builder).Wait());
+  }
   CARBON_ASSIGN_OR_RETURN(std::filesystem::path libcxx_path,
                           std::move(libcxx_builder).Wait());
 
@@ -308,13 +321,24 @@ auto ClangRunner::RunInternal(
     return RunClangCC1(cstr_args, enable_leaking) == 0;
   }
 
+  // Determine whether we're running in `clang-cl` driver mode before
+  // constructing default prefix arguments so GNU-only options can be wrapped
+  // with `/clang:`.
+  llvm::SmallVector<const char*, 64> raw_cstr_args =
+      BuildCStrArgs(clang_path, args, alloc);
+  bool is_clang_cl_mode = clang::driver::IsClangCL(
+      clang::driver::getDriverMode(clang_path, raw_cstr_args));
+
   // We start with a custom prefix of arguments to establish Carbon's default
   // configuration for invoking Clang. These may not all be needed for all
   // invocations, so we also suppress warnings about any that are ignored.
   llvm::SmallVector<std::string> prefix_args;
   prefix_args.push_back("--start-no-unused-arguments");
+  if (is_clang_cl_mode) {
+    prefix_args.push_back("/clang:--start-no-unused-arguments");
+  }
 
-  AppendDefaultClangArgs(*installation_, target, prefix_args);
+  AppendDefaultClangArgs(*installation_, target, prefix_args, is_clang_cl_mode);
 
   if (link_runtime_libs) {
     // We don't have a direct way to configure the linker search paths in the
@@ -323,13 +347,19 @@ auto ClangRunner::RunInternal(
     // normal linking rules to govern whether or not to link a given library. We
     // also build our runtimes exclusively as static archives so we don't need
     // to use command line flags to force static runtime linking to occur.
+    auto append_lib_dir = [&](const std::filesystem::path& lib_dir) {
+      if (is_clang_cl_mode) {
+        prefix_args.push_back(
+            llvm::formatv("/clang:-Wl,-libpath:{0}", lib_dir.string()).str());
+      } else {
+        prefix_args.push_back(llvm::formatv("-L{0}", lib_dir.string()).str());
+      }
+    };
     if (libunwind_path) {
-      prefix_args.push_back(
-          llvm::formatv("-L{0}", (*libunwind_path / "lib").string()).str());
+      append_lib_dir(*libunwind_path / "lib");
     }
     if (libcxx_path) {
-      prefix_args.push_back(
-          llvm::formatv("-L{0}", (*libcxx_path / "lib").string()).str());
+      append_lib_dir(*libcxx_path / "lib");
     }
   } else {
     // If we are suppressing the linking of default libs, ensure we didn't get a
@@ -348,7 +378,10 @@ auto ClangRunner::RunInternal(
     // wrong, as it likely suppresses the linking of the _C_ standard library,
     // which isn't one of the Clang runtime libraries we're trying to control
     // here. But the only user of this currently doesn't need to distinguish.
-    prefix_args.push_back("-nostdlib");
+    prefix_args.push_back(is_clang_cl_mode ? "/clang:-nostdlib" : "-nostdlib");
+  }
+  if (is_clang_cl_mode) {
+    prefix_args.push_back("/clang:--end-no-unused-arguments");
   }
   prefix_args.push_back("--end-no-unused-arguments");
 
@@ -357,8 +390,6 @@ auto ClangRunner::RunInternal(
       BuildCStrArgs(clang_path, prefix_args, args, alloc);
 
   // Expand any response files in the arguments.
-  bool is_clang_cl_mode = clang::driver::IsClangCL(
-      clang::driver::getDriverMode(clang_path, cstr_args));
   if (llvm::Error error = clang::driver::expandResponseFiles(
           cstr_args, is_clang_cl_mode, alloc, fs_.get())) {
     return Error(llvm::toString(std::move(error)));

@@ -54,8 +54,9 @@ class Context {
       llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> fs, bool want_debug_info,
       const Parse::GetTreeAndSubtreesStore* tree_and_subtrees_getters,
       clang::CodeGenerator* code_generator, llvm::StringRef module_name,
-      int total_ir_count, Lower::OptimizationLevel opt_level,
-      bool mangle_string_fingerprint, llvm::raw_ostream* vlog_stream);
+      llvm::StringRef target, int total_ir_count,
+      Lower::OptimizationLevel opt_level, bool mangle_string_fingerprint,
+      llvm::raw_ostream* vlog_stream);
 
   // Gets or creates the `FileContext` for a given SemIR file. If an
   // `inst_namer` is specified the first time this is called for a file, it will
@@ -162,6 +163,10 @@ class Context {
 
   // The filesystem for source code.
   llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> file_system_;
+
+  // The target triple for lowering, used when `llvm_module_` does not yet have
+  // a target triple set.
+  llvm::Triple target_triple_;
 
   // The optimization level to specify for lowered function definitions.
   Lower::OptimizationLevel opt_level_;

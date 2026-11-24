@@ -28,6 +28,7 @@
 #include "llvm/Object/Archive.h"
 #include "llvm/Object/ArchiveWriter.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/FormatAdapters.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/Path.h"
@@ -41,6 +42,64 @@
 #include "toolchain/driver/runtimes_cache.h"
 
 namespace Carbon {
+
+#ifdef _WIN32
+// Recursively copies `src` to `dst` using LLVM's filesystem APIs so Windows
+// users do not need symlink privileges (Developer Mode) to populate the cached
+// Clang resource directory.
+static auto CopyDirectoryRecursive(const std::filesystem::path& src,
+                                   const std::filesystem::path& dst)
+    -> ErrorOr<Success> {
+  std::string src_str = src.string();
+  std::string dst_str = dst.string();
+  if (std::error_code ec = llvm::sys::fs::create_directories(dst_str)) {
+    return Error(llvm::formatv("Failed to create directory `{0}`: {1}", dst_str,
+                               ec.message()));
+  }
+  std::error_code ec;
+  for (llvm::sys::fs::recursive_directory_iterator
+           it(src_str, ec, /*follow_symlinks=*/true),
+       end;
+       it != end && !ec; it.increment(ec)) {
+    llvm::StringRef rel_str = it->path();
+    CARBON_CHECK(rel_str.consume_front(src_str),
+                 "Directory entry `{0}` did not start with `{1}`", it->path(),
+                 src_str);
+    rel_str = rel_str.ltrim("/\\");
+    std::filesystem::path out_path = dst / std::string_view(rel_str);
+    llvm::sys::fs::file_status st;
+    if (std::error_code st_ec = llvm::sys::fs::status(it->path(), st)) {
+      return Error(llvm::formatv("Failed to stat `{0}`: {1}", it->path(),
+                                 st_ec.message()));
+    }
+    if (llvm::sys::fs::is_directory(st)) {
+      if (std::error_code dir_ec =
+              llvm::sys::fs::create_directories(out_path.string())) {
+        return Error(llvm::formatv("Failed to create directory `{0}`: {1}",
+                                   out_path.string(), dir_ec.message()));
+      }
+    } else if (llvm::sys::fs::is_regular_file(st)) {
+      if (std::error_code parent_ec = llvm::sys::fs::create_directories(
+              out_path.parent_path().string())) {
+        return Error(llvm::formatv("Failed to create directory `{0}`: {1}",
+                                   out_path.parent_path().string(),
+                                   parent_ec.message()));
+      }
+      if (std::error_code copy_ec =
+              llvm::sys::fs::copy_file(it->path(), out_path.string())) {
+        return Error(llvm::formatv("Failed to copy `{0}` to `{1}`: {2}",
+                                   it->path(), out_path.string(),
+                                   copy_ec.message()));
+      }
+    }
+  }
+  if (ec) {
+    return Error(
+        llvm::formatv("Failed to traverse `{0}`: {1}", src_str, ec.message()));
+  }
+  return Success();
+}
+#endif
 
 ClangRuntimesBuilderBase::ClangRuntimesBuilderBase(
     ClangRunner* clang, llvm::ThreadPoolInterface* threads,
@@ -139,8 +198,8 @@ auto ClangRuntimesBuilderBase::ArchiveBuilder::Finish() -> ErrorOr<Success> {
     llvm::raw_fd_ostream archive_os = archive_file.WriteStream();
     llvm::Error archive_err = llvm::writeArchiveToStream(
         archive_os, unwrapped_objs, llvm::SymtabWritingMode::NormalSymtab,
-        builder_->target_triple_.isOSDarwin() ? llvm::object::Archive::K_DARWIN
-                                              : llvm::object::Archive::K_GNU,
+        llvm::object::Archive::getDefaultKindForTriple(
+            builder_->target_triple_),
         /*Deterministic=*/true, /*Thin=*/false);
     // The presence of an error is `true`.
     if (archive_err) {
@@ -271,9 +330,16 @@ ClangArchiveRuntimesBuilder<Component>::ClangArchiveRuntimesBuilder(
     : ClangRuntimesBuilderBase(clang, threads, features) {
   // Ensure we're on a platform where we _can_ build a working runtime.
   if (target_triple_.isOSWindows()) {
-    result_ =
-        Error("TODO: Windows runtimes are untested and not yet supported.");
-    return;
+    if (!target_triple_.isKnownWindowsMSVCEnvironment()) {
+      result_ = Error(
+          "TODO: Non-MSVC Windows runtimes are untested and not yet "
+          "supported.");
+      return;
+    }
+    if constexpr (Component == Runtimes::LibUnwind) {
+      result_ = Error("libunwind is not used on Windows MSVC targets.");
+      return;
+    }
   }
 
   auto build_dir_or_error = runtimes->Build(Component);
@@ -299,17 +365,23 @@ ClangArchiveRuntimesBuilder<Component>::ClangArchiveRuntimesBuilder(
     archive_path_ = std::filesystem::path("lib") / "libunwind.a";
     include_paths_ = {(installation().libunwind_path() / "include").string()};
   } else if constexpr (Component == Runtimes::Libcxx) {
-    archive_path_ = std::filesystem::path("lib") / "libc++.a";
+    archive_path_ =
+        std::filesystem::path("lib") /
+        (target_triple_.isKnownWindowsMSVCEnvironment() ? "libc++.lib"
+                                                        : "libc++.a");
     include_paths_ = {
         (installation().libcxx_path() / "include").string(),
         // Some private headers of libc++ are nested in the source directory.
         (installation().libcxx_path() / "src").string(),
-        (installation().libcxxabi_path() / "include").string(),
         // Libc++ also uses llvm-libc header-only libraries for parts of its
         // implementation. All the `#include`s are relative to the root of the
         // internal libc source tree rather than an `include` directory.
         (installation().libc_path() / "internal").string(),
     };
+    if (!target_triple_.isKnownWindowsMSVCEnvironment()) {
+      include_paths_.push_back(
+          (installation().libcxxabi_path() / "include").string());
+    }
   } else {
     static_assert(false,
                   "Invalid runtimes component for an archive runtime builder.");
@@ -341,6 +413,11 @@ auto ClangArchiveRuntimesBuilder<Component>::CollectSrcFiles()
         libcxx_target_srcs,
         [](llvm::StringRef src) { return src.ends_with(".cpp"); });
 
+    if (target_triple_.isKnownWindowsMSVCEnvironment()) {
+      // Windows MSVC uses vcruntime + native SEH instead of libc++abi.
+      return llvm::to_vector_of<llvm::StringRef>(libcxx_srcs);
+    }
+
     auto libcxxabi_srcs = llvm::make_filter_range(
         RuntimesBuildInfo::LibcxxabiSrcs,
         [](llvm::StringRef src) { return src.ends_with(".cpp"); });
@@ -369,7 +446,27 @@ auto ClangArchiveRuntimesBuilder<Component>::CollectCflags()
   if constexpr (Component == Runtimes::LibUnwind) {
     llvm::append_range(cflags, RuntimesBuildInfo::LibunwindCopts);
   } else if constexpr (Component == Runtimes::Libcxx) {
-    llvm::append_range(cflags, RuntimesBuildInfo::LibcxxCopts);
+    if (target_triple_.isKnownWindowsMSVCEnvironment()) {
+      // Clang rejects `-fPIC` on Windows MSVC, and MSVC targets use vcruntime
+      // rather than libc++abi.
+      for (llvm::StringRef copt : RuntimesBuildInfo::LibcxxCopts) {
+        if (copt != "-fPIC" && copt != "-DLIBCXX_BUILDING_LIBCXXABI") {
+          cflags.push_back(copt);
+        }
+      }
+      // Match libc++'s Windows MSVC CMake build configuration and Carbon's
+      // dynamic CRT (`/MD`) target policy.
+      cflags.append({
+          "-fms-runtime-lib=dll",
+          "-D_ALLOW_MSC_VER_MISMATCH",
+          "-D_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH",
+          "-D_CRTBLD",
+          "-D_CRT_SECURE_NO_WARNINGS",
+          "-D_CRT_STDIO_ISO_WIDE_SPECIFIERS",
+      });
+    } else {
+      llvm::append_range(cflags, RuntimesBuildInfo::LibcxxCopts);
+    }
   } else {
     static_assert(false,
                   "Invalid runtimes component for an archive runtime builder.");
@@ -430,9 +527,10 @@ ClangResourceDirBuilder::ClangResourceDirBuilder(
       crt_begin_result_(Error("Never built CRT begin file!")),
       crt_end_result_(Error("Never built CRT end file!")) {
   // Ensure we're on a platform where we _can_ build a working runtime.
-  if (target_triple_.isOSWindows()) {
-    result_ =
-        Error("TODO: Windows runtimes are untested and not yet supported.");
+  if (target_triple_.isOSWindows() &&
+      !target_triple_.isKnownWindowsMSVCEnvironment()) {
+    result_ = Error(
+        "TODO: Non-MSVC Windows runtimes are untested and not yet supported.");
     return;
   }
 
@@ -466,6 +564,9 @@ ClangResourceDirBuilder::ClangResourceDirBuilder(
             .str();
   } else {
     lib_path_ /= target_triple_.str();
+    if (target_triple_.isKnownWindowsMSVCEnvironment()) {
+      builtins_name = "clang_rt.builtins.lib";
+    }
   }
 
   // TODO: Currently, we only need a single include path to see headers inside
@@ -479,7 +580,16 @@ ClangResourceDirBuilder::ClangResourceDirBuilder(
       "-no-canonical-prefixes",
       "-w",
   };
-  llvm::append_range(copts, RuntimesBuildInfo::BuiltinsCopts);
+  if (target_triple_.isOSWindows()) {
+    // Clang rejects `-fPIC` on Windows targets.
+    for (llvm::StringRef copt : RuntimesBuildInfo::BuiltinsCopts) {
+      if (copt != "-fPIC") {
+        copts.push_back(copt);
+      }
+    }
+  } else {
+    llvm::append_range(copts, RuntimesBuildInfo::BuiltinsCopts);
+  }
   for (const std::string& include_path : include_paths_) {
     copts.append({"-I", include_path});
   }
@@ -514,19 +624,52 @@ auto ClangResourceDirBuilder::CollectBuiltinsSrcFiles()
   // Only compile source files, not headers.
   llvm::erase_if(src_files,
                  [](llvm::StringRef file) { return file.ends_with(".h"); });
+
+  if (target_triple_.isOSWindows() && target_triple_.isX86()) {
+    bool is_msvc = target_triple_.isKnownWindowsMSVCEnvironment();
+    llvm::erase_if(src_files, [is_msvc](llvm::StringRef file) {
+      // The x86_64 assembly routines assume the SysV calling convention.
+      if (file.ends_with("x86_64/floatundidf.S") ||
+          file.ends_with("x86_64/floatundisf.S") ||
+          file.ends_with("x86_64/floatundixf.S")) {
+        return true;
+      }
+      if (is_msvc) {
+        // `long double` is 64-bit on Windows MSVC, so 80-bit extended-precision
+        // (`xf` / `xc`) builtins do not apply and fail to compile.
+        llvm::StringRef basename = llvm::sys::path::filename(file);
+        if (basename.contains("xf") || basename.contains("xc")) {
+          return true;
+        }
+      }
+      return false;
+    });
+  }
   return src_files;
 }
 
 auto ClangResourceDirBuilder::Setup() -> void {
-  // Symlink the installation's `include` and `share` directories.
+  // Populate the resource directory's `include` directory from the
+  // installation. On Windows, copy recursively so end users do not need
+  // symlink privileges (Developer Mode).
   std::filesystem::path install_resource_path =
       installation().clang_resource_path();
+#ifdef _WIN32
+  if (auto result =
+          CopyDirectoryRecursive(install_resource_path / "include",
+                                 runtimes_builder_->path() / "include");
+      !result.ok()) {
+    result_ = std::move(result).error();
+    return;
+  }
+#else
   if (auto result = runtimes_builder_->dir().Symlink(
           "include", (install_resource_path / "include").string());
       !result.ok()) {
     result_ = std::move(result).error();
     return;
   }
+#endif
 
   // Create the target's `lib` directory.
   auto lib_dir_result = runtimes_builder_->dir().CreateDirectories(lib_path_);

@@ -193,6 +193,9 @@ class ClangRuntimesTest : public ::testing::Test {
               .str();
     } else {
       lib_path /= target_;
+      if (target_triple_.isKnownWindowsMSVCEnvironment()) {
+        builtins_name = "clang_rt.builtins.lib";
+      }
     }
     std::filesystem::path builtins_path =
         resource_dir_path / lib_path / builtins_name;
@@ -302,6 +305,9 @@ TEST_F(ClangRuntimesTest, ResourceDir) {
 }
 
 TEST_F(ClangRuntimesTest, Libunwind) {
+  if (target_triple_.isKnownWindowsMSVCEnvironment()) {
+    GTEST_SKIP() << "libunwind is not used on Windows MSVC targets.";
+  }
   LibunwindBuilder libunwind_builder(&runner_, &threads_, &runtimes_,
                                      features_);
   auto build_result = std::move(libunwind_builder).Wait();

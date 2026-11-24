@@ -432,6 +432,67 @@ TEST_F(ClangRunnerTest, ComputeRuntimesFeatures) {
   EXPECT_THAT(compute({.target = "riscv64-unknown-linux-gnu",
                        .target_cpu_features = "+f,+zfinx"}),
               IsError(_));
+
+  // Windows MSVC target should succeed without `-fPIE` errors.
+  auto win_msvc = compute({.target = "x86_64-pc-windows-msvc"});
+  ASSERT_THAT(win_msvc, IsSuccess(_));
+  EXPECT_THAT(win_msvc->cpu, StrEq("x86-64"));
+}
+
+TEST_F(ClangRunnerTest, WindowsMsvcLinkCommandEcho) {
+  std::filesystem::path foo_file = *Testing::WriteTestFile("win_foo.obj", "");
+
+  RawStringOstream verbose_out;
+  ClangRunner runner(&install_paths_, vfs_, &verbose_out);
+  std::string out;
+  std::string err;
+  EXPECT_THAT(Testing::CallWithCapturedOutput(
+                  out, err,
+                  [&] {
+                    return runner.RunWithNoRuntimes(
+                        {"--driver-mode=g++", "--target=x86_64-pc-windows-msvc",
+                         "-nostartfiles", "-Wl,-defaultlib:msvcrt",
+                         "-Wl,-defaultlib:oldnames", "-###", "-o", "app.exe",
+                         foo_file.string()});
+                  }),
+              IsSuccess(true))
+      << "Verbose output from runner:\n"
+      << verbose_out.TakeStr() << "\n";
+  verbose_out.clear();
+
+  EXPECT_THAT(out, StrEq(""));
+  EXPECT_THAT(err, HasSubstr("lld-link")) << err;
+  EXPECT_THAT(err, HasSubstr("-out:app.exe")) << err;
+  EXPECT_THAT(err, HasSubstr("-defaultlib:msvcrt")) << err;
+  EXPECT_THAT(err, HasSubstr("-defaultlib:oldnames")) << err;
+  EXPECT_THAT(err, HasSubstr(foo_file.string())) << err;
+  EXPECT_THAT(err, Not(HasSubstr("-defaultlib:libcmt"))) << err;
+}
+
+TEST_F(ClangRunnerTest, ClangClCompileCommandEcho) {
+  std::filesystem::path test_file =
+      *Testing::WriteTestFile("cl_test.cpp", "int f() { return 0; }");
+
+  RawStringOstream verbose_out;
+  ClangRunner runner(&install_paths_, vfs_, &verbose_out);
+  std::string out;
+  std::string err;
+  EXPECT_THAT(Testing::CallWithCapturedOutput(out, err,
+                                              [&] {
+                                                return runner.RunWithNoRuntimes(
+                                                    {"--driver-mode=cl", "-###",
+                                                     "/c", test_file.string()});
+                                              }),
+              IsSuccess(true))
+      << "Verbose output from runner:\n"
+      << verbose_out.TakeStr() << "\n";
+  verbose_out.clear();
+
+  EXPECT_THAT(out, StrEq(""));
+  EXPECT_THAT(err, HasSubstr("-triple\" \"x86_64-pc-windows-msvc")) << err;
+  EXPECT_THAT(err, HasSubstr("--dependent-lib=msvcrt")) << err;
+  EXPECT_THAT(err, Not(HasSubstr("warning:"))) << err;
+  EXPECT_THAT(err, Not(HasSubstr("error:"))) << err;
 }
 
 }  // namespace

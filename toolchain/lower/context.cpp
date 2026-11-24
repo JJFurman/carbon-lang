@@ -35,8 +35,9 @@ Context::Context(
     llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> fs, bool want_debug_info,
     const Parse::GetTreeAndSubtreesStore* tree_and_subtrees_getters,
     clang::CodeGenerator* cpp_code_generator, llvm::StringRef module_name,
-    int total_ir_count, Lower::OptimizationLevel opt_level,
-    bool mangle_string_fingerprint, llvm::raw_ostream* vlog_stream)
+    llvm::StringRef target, int total_ir_count,
+    Lower::OptimizationLevel opt_level, bool mangle_string_fingerprint,
+    llvm::raw_ostream* vlog_stream)
     : llvm_context_(llvm_context),
       cpp_code_generator_(cpp_code_generator),
       llvm_module_owner_(cpp_code_generator_ ? nullptr
@@ -45,6 +46,7 @@ Context::Context(
       llvm_module_(llvm_module_owner_ ? llvm_module_owner_.get()
                                       : cpp_code_generator_->GetModule()),
       file_system_(std::move(fs)),
+      target_triple_(target),
       opt_level_(opt_level),
       di_builder_(*llvm_module_),
       di_compile_unit_(want_debug_info
@@ -89,7 +91,15 @@ auto Context::Finalize() && -> std::unique_ptr<llvm::Module> {
   }
 
   if (di_compile_unit_) {
-    CheckOrAddModuleFlag(*llvm_module_, llvm::Module::Max, "Dwarf Version", 5);
+    const llvm::Triple& triple = llvm_module_->getTargetTriple().empty()
+                                     ? target_triple_
+                                     : llvm_module_->getTargetTriple();
+    if (triple.isKnownWindowsMSVCEnvironment()) {
+      CheckOrAddModuleFlag(*llvm_module_, llvm::Module::Warning, "CodeView", 1);
+    } else {
+      CheckOrAddModuleFlag(*llvm_module_, llvm::Module::Max, "Dwarf Version",
+                           5);
+    }
     CheckOrAddModuleFlag(*llvm_module_, llvm::Module::Warning,
                          "Debug Info Version", llvm::DEBUG_METADATA_VERSION);
   }

@@ -34,7 +34,8 @@ auto object_search(Filesystem::DirRef base_dir, std::filesystem::path base_path,
                                 if (stat->is_dir()) {
                                   return true;
                                 }
-                                return path.extension() == ".o";
+                                auto ext = path.extension();
+                                return ext == ".o" || ext == ".obj";
                               })
             .ok());
     llvm::append_range(
@@ -68,9 +69,20 @@ auto LinkDriver::Link(DriverEnv& driver_env) -> DriverResult {
   clang_args.push_back("--driver-mode=g++");
 
   // Pass the target and codegen flags down to Clang as defaults.
+  llvm::Triple target_triple(options_->codegen_options->target);
   std::string target_arg =
       llvm::formatv("--target={0}", options_->codegen_options->target).str();
   clang_args.push_back(target_arg);
+  if (target_triple.isKnownWindowsMSVCEnvironment()) {
+    // Outside CL mode, Clang's MSVCToolChain defaults to `-defaultlib:libcmt`
+    // regardless of `-fms-runtime-lib=dll`. Suppress the default CRT libs and
+    // select the dynamic CRT matching `/MD`, plus `legacy_stdio_definitions`
+    // for external `printf` calls emitted by Carbon lowering.
+    clang_args.push_back("-nostartfiles");
+    clang_args.push_back("-Wl,-defaultlib:msvcrt");
+    clang_args.push_back("-Wl,-defaultlib:oldnames");
+    clang_args.push_back("-Wl,-defaultlib:legacy_stdio_definitions");
+  }
   llvm::SmallVector<std::string> codegen_clang_args =
       options_->codegen_options->GetClangArgs();
   if (!codegen_clang_args.empty()) {
