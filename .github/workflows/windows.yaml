@@ -98,7 +98,9 @@ jobs:
           $installer = Join-Path $env:RUNNER_TEMP "LLVM-$env:LLVM_RELEASE-win64.exe"
           $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$env:LLVM_RELEASE/LLVM-$env:LLVM_RELEASE-win64.exe"
           Write-Host "*** Downloading $url"
-          curl.exe -fsSL --retry 5 -o $installer $url
+          # harden-runner blocks outbound OCSP/CRL revocation servers, which
+          # causes Windows Schannel to fail with CRYPT_E_REVOCATION_OFFLINE.
+          curl.exe -fsSL --ssl-revoke-best-effort --retry 5 -o $installer $url
           Write-Host "*** Extracting to $env:LLVM_DIR"
           New-Item -ItemType Directory -Force -Path $env:LLVM_DIR | Out-Null
           7z x $installer "-o$env:LLVM_DIR" -y | Out-Null
@@ -143,12 +145,20 @@ jobs:
             Add-Content -Path $env:GITHUB_ENV -Value "BAZEL_SH=$gitBash"
           }
 
+          # harden-runner blocks outbound OCSP/CRL revocation servers; disable
+          # Git for Windows Schannel revocation checks so Bazel git_override
+          # fetches do not fail with CRYPT_E_REVOCATION_OFFLINE (no-op if Git
+          # uses OpenSSL).
+          git config --global http.schannelCheckRevoke false
+
           if (-not (Get-Command bazelisk -ErrorAction SilentlyContinue)) {
             $bazeliskDir = Join-Path $env:RUNNER_TEMP 'bazelisk'
             New-Item -ItemType Directory -Force -Path $bazeliskDir | Out-Null
             $bazeliskExe = Join-Path $bazeliskDir 'bazelisk.exe'
             $url = 'https://github.com/bazelbuild/bazelisk/releases/download/v1.28.1/bazelisk-windows-amd64.exe'
-            curl.exe -fsSL --retry 5 -o $bazeliskExe $url
+            # harden-runner blocks outbound OCSP/CRL revocation servers, which
+            # causes Windows Schannel to fail with CRYPT_E_REVOCATION_OFFLINE.
+            curl.exe -fsSL --ssl-revoke-best-effort --retry 5 -o $bazeliskExe $url
             $actualHash = (Get-FileHash -Algorithm SHA256 -Path $bazeliskExe).Hash.ToLower()
             $expectedHash = 'b9d65a1f7c2d7af885a96a4fd5aa36b40fb41816d30944390569eef908bdc954'
             if ($actualHash -ne $expectedHash) {
