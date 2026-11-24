@@ -17,6 +17,7 @@
 #include <cerrno>
 #include <chrono>
 #include <concepts>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <iterator>

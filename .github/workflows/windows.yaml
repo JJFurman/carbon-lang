@@ -79,16 +79,16 @@ jobs:
             has_code:
               - '!{**/*.md,LICENSE,CODEOWNERS,.git*}'
 
-      - name: Cache LLVM and Clang installation
+      - name: Restore LLVM and Clang cache
         id: cache-llvm-windows
         if: steps.filter.outputs.has_code == 'true'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.LLVM_DIR }}
           key: LLVM-${{ env.LLVM_RELEASE }}-Cache-windows-${{ runner.arch }}
-          save-always: true
 
       - name: Download LLVM and Clang installation
+        id: download-llvm-windows
         if:
           steps.filter.outputs.has_code == 'true' &&
           steps.cache-llvm-windows.outputs.cache-hit != 'true'
@@ -181,9 +181,10 @@ jobs:
             & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           }
 
-      - name: Cache Bazel disk and repository caches
+      - name: Restore Bazel disk and repository caches
+        id: cache-bazel-windows
         if: steps.filter.outputs.has_code == 'true'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ${{ env.BAZEL_DISK_CACHE }}
@@ -195,7 +196,6 @@ jobs:
           restore-keys: |
             bazel-cache-windows-${{ runner.arch }}-llvm-${{ env.LLVM_RELEASE }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc') }}-
             bazel-cache-windows-${{ runner.arch }}-llvm-${{ env.LLVM_RELEASE }}-
-          save-always: true
 
       - name: Configure Bazel
         if: steps.filter.outputs.has_code == 'true'
@@ -222,7 +222,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          bazelisk build //toolchain/install:carbon-busybox //toolchain/install:carbon_cc_toolchain_config_for_install
+          bazelisk build --keep_going //toolchain/install:carbon-busybox //toolchain/install:carbon_cc_toolchain_config_for_install
 
       - name: Run carbon-busybox --version
         if: steps.filter.outputs.has_code == 'true'
@@ -241,9 +241,41 @@ jobs:
           bazelisk test //common:filesystem_test
 
       - name: Shut down Bazel before saving cache
+        id: shutdown-bazel
         if: always() && steps.filter.outputs.has_code == 'true'
         shell: pwsh
         run: |
           if (Get-Command bazelisk -ErrorAction SilentlyContinue) {
             bazelisk shutdown
           }
+          if (Test-Path (Join-Path $env:LLVM_DIR 'bin\clang-cl.exe')) {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value 'has_llvm=true'
+          }
+          if ((Test-Path $env:BAZEL_DISK_CACHE) -or (Test-Path $env:BAZEL_REPO_CACHE)) {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value 'has_bazel_cache=true'
+          }
+
+      - name: Save LLVM and Clang cache
+        if:
+          always() && !cancelled() && steps.filter.outputs.has_code == 'true' &&
+          steps.cache-llvm-windows.outputs.cache-primary-key != '' &&
+          steps.cache-llvm-windows.outputs.cache-hit != 'true' &&
+          steps.download-llvm-windows.outcome == 'success' &&
+          steps.shutdown-bazel.outputs.has_llvm == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.LLVM_DIR }}
+          key: ${{ steps.cache-llvm-windows.outputs.cache-primary-key }}
+
+      - name: Save Bazel disk and repository caches
+        if:
+          always() && !cancelled() && steps.filter.outputs.has_code == 'true' &&
+          steps.cache-bazel-windows.outputs.cache-primary-key != '' &&
+          steps.cache-bazel-windows.outputs.cache-hit != 'true' &&
+          steps.shutdown-bazel.outputs.has_bazel_cache == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.BAZEL_DISK_CACHE }}
+            ${{ env.BAZEL_REPO_CACHE }}
+          key: ${{ steps.cache-bazel-windows.outputs.cache-primary-key }}

@@ -12,7 +12,9 @@
 #include <io.h>
 #endif
 
+#include <array>
 #include <concepts>
+#include <cstring>
 #include <string>
 #include <thread>
 #include <utility>
