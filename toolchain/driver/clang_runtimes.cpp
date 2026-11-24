@@ -522,7 +522,7 @@ auto ClangResourceDirBuilder::Setup() -> void {
   std::filesystem::path install_resource_path =
       installation().clang_resource_path();
   if (auto result = runtimes_builder_->dir().Symlink(
-          "include", install_resource_path / "include");
+          "include", (install_resource_path / "include").string());
       !result.ok()) {
     result_ = std::move(result).error();
     return;

@@ -175,21 +175,20 @@ auto Internal::FileRefBase::Stat() -> ErrorOr<FileStatus, FdError> {
 
 auto Internal::FileRefBase::UpdateTimes(std::optional<TimePoint> time_point)
     -> ErrorOr<Success, FdError> {
+  llvm::StringLiteral error_format =
+      time_point
+          ? llvm::StringLiteral("File::UpdateTimes to a specific time on '{0}'")
+          : llvm::StringLiteral("File::UpdateTimes to now on '{0}'");
   if (fd_ < 0) {
     return FdError(std::make_error_code(std::errc::bad_file_descriptor),
-                   time_point ? "File::UpdateTimes to a specific time on '{0}'"
-                              : "File::UpdateTimes to now on '{0}'",
-                   fd_);
+                   error_format, fd_);
   }
   TimePoint target_time =
       time_point ? *time_point
                  : std::chrono::time_point_cast<Duration>(Clock::now());
   if (std::error_code ec =
           llvm::sys::fs::setLastAccessAndModificationTime(fd_, target_time)) {
-    return FdError(ec,
-                   time_point ? "File::UpdateTimes to a specific time on '{0}'"
-                              : "File::UpdateTimes to now on '{0}'",
-                   fd_);
+    return FdError(ec, error_format, fd_);
   }
   return Success();
 }
@@ -472,9 +471,11 @@ auto DirRef::UpdateTimes(const std::filesystem::path& path,
                          std::optional<TimePoint> time_point)
     -> ErrorOr<Success, PathError> {
   llvm::StringLiteral error_format =
-      time_point ? "Dir::UpdateTimes to a specific time on '{0}' relative "
-                   "to '{1}'"
-                 : "Dir::UpdateTimes to now on '{0}' relative to '{1}'";
+      time_point ? llvm::StringLiteral(
+                       "Dir::UpdateTimes to a specific time on '{0}' relative "
+                       "to '{1}'")
+                 : llvm::StringLiteral(
+                       "Dir::UpdateTimes to now on '{0}' relative to '{1}'");
   CARBON_ASSIGN_OR_RETURN(std::filesystem::path resolved,
                           ResolvePath(path, error_format));
   TimePoint target_time =
