@@ -103,6 +103,28 @@ jobs:
           New-Item -ItemType Directory -Force -Path $env:LLVM_DIR | Out-Null
           7z x $installer "-o$env:LLVM_DIR" -y | Out-Null
           Remove-Item -Force $installer
+          # Prune large unused LLVM components to save runner disk space and
+          # GitHub Actions cache budget.
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue `
+            (Join-Path $env:LLVM_DIR '$PLUGINSDIR'), `
+            (Join-Path $env:LLVM_DIR 'Uninstall.exe')
+          $binDir = Join-Path $env:LLVM_DIR 'bin'
+          Get-ChildItem -Path $binDir -File | Where-Object {
+            $_.Name -like 'flang*' -or
+            $_.Name -like 'lldb*' -or
+            $_.Name -like 'mlir*' -or
+            $_.Name -like 'clangd*' -or
+            $_.Name -like 'clang-tidy*' -or
+            $_.Name -like 'clang-check*' -or
+            $_.Name -like 'clang-repl*' -or
+            $_.Name -like 'clang-scan-deps*' -or
+            $_.Name -like 'llvm-lto*' -or
+            $_.Name -like 'llvm-bolt*' -or
+            $_.Name -like 'llvm-exegesis*' -or
+            $_.Name -like 'llvm-jitlink*' -or
+            $_.Name -like 'llvm-reduce*' -or
+            $_.Name -in @('opt.exe', 'llc.exe', 'bugpoint.exe')
+          } | Remove-Item -Force
 
       - name: Setup LLVM, Visual Studio, and Bazelisk
         if: steps.filter.outputs.has_code == 'true'
@@ -113,6 +135,13 @@ jobs:
           $llvmBin = Join-Path $env:LLVM_DIR 'bin'
           Add-Content -Path $env:GITHUB_ENV -Value "BAZEL_LLVM=$env:LLVM_DIR"
           Add-Content -Path $env:GITHUB_PATH -Value $llvmBin
+
+          # Point Bazel at Git Bash so repository rules that invoke bash do not
+          # fall through to the unconfigured WSL `C:\Windows\System32\bash.exe`.
+          $gitBash = 'C:\Program Files\Git\bin\bash.exe'
+          if (Test-Path $gitBash) {
+            Add-Content -Path $env:GITHUB_ENV -Value "BAZEL_SH=$gitBash"
+          }
 
           if (-not (Get-Command bazelisk -ErrorAction SilentlyContinue)) {
             $bazeliskDir = Join-Path $env:RUNNER_TEMP 'bazelisk'
@@ -169,6 +198,7 @@ jobs:
           common --disk_cache=$diskCache
           common --repository_cache=$repoCache
           common --experimental_disk_cache_gc_max_size=8G
+          common --experimental_repository_downloader_retries=5
           build --verbose_failures
           test --test_output=errors
           "@ | Set-Content -Path user.bazelrc -Encoding utf8

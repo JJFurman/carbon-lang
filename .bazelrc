@@ -2,6 +2,10 @@
 # Exceptions. See /LICENSE for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+# Enable native symlinks on Windows (a no-op on Unix). Required by
+# `rules_python` 2.0+ runtime venvs and materialized runfiles on Windows.
+startup --windows_enable_symlinks
+
 # Setup stamping with Carbon's workspace status attached but disable it by
 # default.
 #
@@ -143,11 +147,15 @@ common:linux --copt=-fdebug-prefix-map=/proc/self/cwd=
 common:macos --copt=-fdebug-prefix-map=/proc/self/cwd=
 common:freebsd --copt=-fdebug-prefix-map=/proc/self/cwd=
 
-# Stage 0 Windows builds use `@rules_cc`'s auto-configured `clang-cl` toolchain.
-# `USE_CLANG_CL=1` swaps `clang-cl.exe`, `lld-link.exe`, and `llvm-lib.exe` into
-# `@local_config_cc_toolchains//:cc-toolchain-x64_windows` and sets
-# `@rules_cc//cc/compiler:compiler` to `clang-cl`.
+# Stage 0 Windows builds use `@rules_cc`'s dedicated `clang-cl` toolchain
+# (`@local_config_cc//:cc-compiler-*-windows-clang-cl`, where `clang-cl.exe` is
+# also the assembler for GAS `.S` files such as LLVM's BLAKE3 assembly).
+# `USE_CLANG_CL=1` also ensures any fallback to the default MSVC toolchain uses
+# `clang-cl`, and `BAZEL_WIN32_WINNT` targets Windows 10+ instead of Windows 7.
 common:windows --repo_env=USE_CLANG_CL=1
+common:windows --repo_env=BAZEL_WIN32_WINNT=/D_WIN32_WINNT=0x0A00
+common:windows --enable_runfiles
+common:windows --features=shorten_virtual_includes --host_features=shorten_virtual_includes
 common:windows --cxxopt=/std:c++20 --host_cxxopt=/std:c++20
 common:windows --cxxopt=/Zc:__cplusplus --host_cxxopt=/Zc:__cplusplus
 common:windows --copt=/Zc:inline --host_copt=/Zc:inline

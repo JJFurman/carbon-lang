@@ -172,23 +172,69 @@ def _compute_clang_cpp_include_search_paths(repository_ctx, clang, sysroot):
     ]
 
 def _configure_clang_toolchain_impl(repository_ctx):
-    # Stage 0 Windows builds use `@rules_cc`'s auto-configured `clang-cl`
-    # toolchain (`USE_CLANG_CL=1`). Emit an empty `BUILD` file so
-    # `register_toolchains` falls through to `@rules_cc`, while still
-    # generating `clang_detected_variables.bzl` for rules that load
-    # `llvm_symbolizer`.
+    # Stage 0 Windows builds use `@rules_cc`'s dedicated `clang-cl` toolchains
+    # (`@local_config_cc//:cc-compiler-*-windows-clang-cl`), where
+    # `clang-cl.exe` is also configured as the assembler for GAS `.S` files
+    # (unlike `:msvc_x64` under `USE_CLANG_CL=1`, which keeps `ml64.exe`).
+    # Emit `toolchain()` targets without the `@rules_cc//cc/private/toolchain:clang-cl`
+    # exec constraint so they match `@platforms//host`, alongside a minimal
+    # `clang_detected_variables.bzl` for rules that load `llvm_symbolizer`.
     if repository_ctx.os.name.lower().startswith("windows"):
-        symbolizer = repository_ctx.which("llvm-symbolizer")
+        symbolizer = (
+            repository_ctx.which("llvm-symbolizer") or
+            repository_ctx.which("llvm-symbolizer.exe")
+        )
         if not symbolizer:
-            bazel_llvm = repository_ctx.os.environ.get("BAZEL_LLVM")
-            if bazel_llvm:
-                candidate = repository_ctx.path(bazel_llvm).get_child("bin").get_child("llvm-symbolizer.exe")
-                if candidate.exists:
-                    symbolizer = candidate
+            for llvm_root in [
+                repository_ctx.os.environ.get("BAZEL_LLVM"),
+                "C:/Program Files/LLVM",
+            ]:
+                if llvm_root:
+                    candidate = repository_ctx.path(llvm_root).get_child("bin").get_child("llvm-symbolizer.exe")
+                    if candidate.exists:
+                        symbolizer = candidate
+                        break
         symbolizer_str = str(symbolizer).replace("\\", "/") if symbolizer else ""
         repository_ctx.file(
             "BUILD",
-            "# Stage 0 Windows builds use @rules_cc's clang-cl toolchain.\n",
+            """# Stage 0 Windows builds use @rules_cc's dedicated clang-cl toolchains.
+package(default_visibility = ["//visibility:public"])
+
+toolchain(
+    name = "bazel_cc_toolchain_windows_x86_64",
+    exec_compatible_with = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:windows",
+    ],
+    target_compatible_with = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:windows",
+    ],
+    target_settings = [
+        "@carbon//toolchain/install:is_bootstrap_stage_0",
+        "@carbon//toolchain/install:not_runtimes_build",
+    ],
+    toolchain = "@local_config_cc//:cc-compiler-x64_windows-clang-cl",
+    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+)
+
+toolchain(
+    name = "bazel_cc_toolchain_windows_arm64",
+    exec_compatible_with = [
+        "@platforms//os:windows",
+    ],
+    target_compatible_with = [
+        "@platforms//cpu:arm64",
+        "@platforms//os:windows",
+    ],
+    target_settings = [
+        "@carbon//toolchain/install:is_bootstrap_stage_0",
+        "@carbon//toolchain/install:not_runtimes_build",
+    ],
+    toolchain = "@local_config_cc//:cc-compiler-arm64_windows-clang-cl",
+    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+)
+""",
             executable = False,
         )
         repository_ctx.template(
