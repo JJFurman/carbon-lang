@@ -1704,9 +1704,18 @@ auto Lexer::LexComment(llvm::StringRef source_text, ssize_t& position) -> void {
       auto prefix_diff = _mm_xor_si128(prefix, next_prefix);
       // If we have any differences (non-zero bits) within the mask, we can't
       // skip the next line too.
+#ifdef __SSE4_1__
       if (!_mm_test_all_zeros(mask, prefix_diff)) {
         break;
       }
+#else
+      // SSE2 fallback when SSE4.1 `ptest` is unavailable (e.g. baseline x86-64
+      // targets such as default Windows builds).
+      if (_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_and_si128(mask, prefix_diff),
+                                           _mm_setzero_si128())) != 0xFFFF) {
+        break;
+      }
+#endif
 
       skip_to_next_line();
     } while (position + 16 < static_cast<ssize_t>(source_text.size()));
