@@ -56,7 +56,8 @@ auto BuildClangInvocation(Diagnostics::Consumer& consumer,
 // invoking Clang directly, this can be used to get the core compatible flags.
 auto AppendDefaultClangArgs(const InstallPaths& install_paths,
                             llvm::StringRef target_str,
-                            llvm::SmallVectorImpl<std::string>& args) -> void;
+                            llvm::SmallVectorImpl<std::string>& args,
+                            bool is_clang_cl = false) -> void;
 
 }  // namespace Carbon
 

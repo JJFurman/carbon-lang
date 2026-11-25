@@ -5,6 +5,7 @@
 #ifndef CARBON_TOOLCHAIN_LOWER_OPTIONS_H_
 #define CARBON_TOOLCHAIN_LOWER_OPTIONS_H_
 
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 
 namespace Carbon::Lower {
@@ -43,6 +44,10 @@ struct LowerToLLVMOptions {
 
   // Whether to generate names for LLVM instructions.
   bool generate_inst_names = false;
+
+  // The target triple string, used for target-specific lowering decisions such
+  // as debug info format.
+  llvm::StringRef target;
 };
 
 }  // namespace Carbon::Lower

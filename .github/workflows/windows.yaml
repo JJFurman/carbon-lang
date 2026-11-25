@@ -37,6 +37,7 @@ jobs:
           # When adding endpoints, see README.md.
           # prettier-ignore
           allowed-endpoints: >
+            *.actions.githubusercontent.com:443
             *.blob.storage.azure.net:443
             *.githubapp.com:443
             *.sourceforge.net:443
@@ -62,6 +63,7 @@ jobs:
             release-assets.githubusercontent.com:443
             releases.astral.sh:443
             releases.bazel.build:443
+            results-receiver.actions.githubusercontent.com:443
             static.crates.io:443
             static.rust-lang.org:443
             storage.googleapis.com:443
@@ -218,13 +220,13 @@ jobs:
           "@ | Set-Content -Path user.bazelrc -Encoding utf8
           bazelisk.exe info
 
-      - name: Build carbon-busybox
+      - name: Build Carbon toolchain
         if: steps.filter.outputs.has_code == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          bazelisk.exe build --keep_going //toolchain/install:carbon-busybox //toolchain/install:carbon_cc_toolchain_config_for_install
+          bazelisk.exe build //toolchain:carbon //toolchain/install:carbon_cc_toolchain_config_for_install
 
       - name: Run carbon-busybox --version
         if: steps.filter.outputs.has_code == 'true'
@@ -239,6 +241,62 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           bazelisk.exe test //common:filesystem_test
+
+      - name: Build Carbon Hello World and Advent of Code Day 1 (.exe)
+        if: steps.filter.outputs.has_code == 'true'
+        # Use cmd so PowerShell does not consume the `--` argument separator.
+        shell: cmd
+        run: |
+          if not exist "%RUNNER_TEMP%\carbon-windows-artifacts" mkdir "%RUNNER_TEMP%\carbon-windows-artifacts"
+          bazelisk.exe run //toolchain:carbon -- build --output="%RUNNER_TEMP%\carbon-windows-artifacts\hello_carbon.exe" examples/hello_world.carbon || exit /b 1
+          bazelisk.exe run //toolchain:carbon -- build --output="%RUNNER_TEMP%\carbon-windows-artifacts\day1_part1.exe" examples/advent2024/day1_part1.carbon examples/advent2024/day1_common.carbon examples/advent2024/io_utils.carbon examples/advent2024/sort.carbon || exit /b 1
+
+      - name: Run compiled Carbon executables and stage artifacts
+        if: steps.filter.outputs.has_code == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $artifactsDir = Join-Path $env:RUNNER_TEMP 'carbon-windows-artifacts'
+
+          Write-Host '*** Running hello_carbon.exe'
+          $helloExe = Join-Path $artifactsDir 'hello_carbon.exe'
+          $helloOut = (& $helloExe | Out-String).Trim()
+          Write-Host "hello_carbon.exe output: $helloOut"
+          if ($helloOut -ne 'Hello world!') {
+            throw "Unexpected hello_carbon.exe output: '$helloOut'"
+          }
+
+          Write-Host '*** Running day1_part1.exe'
+          $day1Exe = Join-Path $artifactsDir 'day1_part1.exe'
+          $sampleInput = @(
+            '3   4',
+            '4   3',
+            '2   5',
+            '1   3',
+            '3   9',
+            '3   3'
+          ) -join "`n"
+          $day1Out = ("$sampleInput`n" | & $day1Exe | Out-String).Trim()
+          Write-Host "day1_part1.exe output: $day1Out"
+          if ($day1Out -ne '11') {
+            throw "Unexpected day1_part1.exe output: '$day1Out', expected '11'"
+          }
+
+          $busyboxPath = @(bazelisk.exe cquery --output=files //toolchain/install:carbon-busybox)[0].Trim()
+          Copy-Item -Force $busyboxPath (Join-Path $artifactsDir 'carbon-busybox.exe')
+          Get-ChildItem $artifactsDir
+
+      - name: Upload Windows executables
+        if: steps.filter.outputs.has_code == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: carbon-windows-x86_64-executables
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/carbon-windows-artifacts/hello_carbon.exe
+            ${{ runner.temp }}/carbon-windows-artifacts/day1_part1.exe
+            ${{ runner.temp }}/carbon-windows-artifacts/carbon-busybox.exe
 
       - name: Shut down Bazel before saving cache
         id: shutdown-bazel

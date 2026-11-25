@@ -104,6 +104,14 @@ configure_cmake_file(
             "#endif",
             "",
 
+            # Carbon builds libc++ as a static library on Windows, so disable
+            # DLL import/export annotations (which also causes libc++ headers
+            # to auto-link `libc++.lib` rather than `c++.lib`).
+            "#ifdef _WIN32",
+            "# define _LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS",
+            "#endif",
+            "",
+
             # Mixing translation units compiled with different versions of
             # libc++ is unsupported. Disable ABI tags to decrease symbol
             # lengths.

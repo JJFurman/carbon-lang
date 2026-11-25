@@ -156,36 +156,55 @@ auto BuildClangInvocation(Diagnostics::Consumer& consumer,
 
 auto AppendDefaultClangArgs(const InstallPaths& install_paths,
                             llvm::StringRef target_str,
-                            llvm::SmallVectorImpl<std::string>& args) -> void {
-  args.append({
-      // Enable PIE by default, but allow it to be overridden by Clang
-      // arguments. Clang's default is configurable, but we'd like our
-      // defaults to be more stable.
-      // TODO: Decide if we want this.
-      "-fPIE",
+                            llvm::SmallVectorImpl<std::string>& args,
+                            bool is_clang_cl) -> void {
+  auto append_gnu_arg = [&](std::string arg) {
+    if (is_clang_cl) {
+      args.push_back("/clang:" + std::move(arg));
+    } else {
+      args.push_back(std::move(arg));
+    }
+  };
 
-      // Enable function and data sections by default, and don't waste object
-      // file size on unique section names. Allow these to be overridden by
-      // Clang arguments.
-      "-ffunction-sections",
-      "-fdata-sections",
-      "-fno-unique-section-names",
+  llvm::Triple triple(llvm::Triple::normalize(target_str));
+  bool is_msvc = triple.isKnownWindowsMSVCEnvironment();
 
-      // Override runtime library defaults.
-      //
-      // TODO: We should consider if there is a reasonable way to build Clang
-      // with its configuration macros set to establish these defaults rather
-      // than doing it with runtime flags.
-      "-rtlib=compiler-rt",
-      "-unwindlib=libunwind",
-      "-stdlib=libc++",
+  if (!is_msvc && !is_clang_cl) {
+    // Enable PIE by default, but allow it to be overridden by Clang
+    // arguments. Clang's default is configurable, but we'd like our
+    // defaults to be more stable.
+    // TODO: Decide if we want this.
+    args.push_back("-fPIE");
+  }
 
-      // Override the default linker to use.
-      "-fuse-ld=lld",
-  });
+  // Enable function and data sections by default, and don't waste object
+  // file size on unique section names. Allow these to be overridden by
+  // Clang arguments.
+  append_gnu_arg("-ffunction-sections");
+  append_gnu_arg("-fdata-sections");
+  append_gnu_arg("-fno-unique-section-names");
+
+  // Override runtime library defaults.
+  //
+  // TODO: We should consider if there is a reasonable way to build Clang
+  // with its configuration macros set to establish these defaults rather
+  // than doing it with runtime flags.
+  args.push_back("-rtlib=compiler-rt");
+  if (!is_msvc) {
+    append_gnu_arg("-unwindlib=libunwind");
+  }
+  append_gnu_arg("-stdlib=libc++");
+
+  // Override the default linker to use.
+  args.push_back("-fuse-ld=lld");
+
+  if (is_msvc) {
+    // Match the dynamic MSVC C runtime (`/MD`) by default so C++ interop and
+    // bundled static `libc++` agree on the CRT ABI.
+    args.push_back(is_clang_cl ? "/MD" : "-fms-runtime-lib=dll");
+  }
 
   // Add target-specific flags.
-  llvm::Triple triple(target_str);
   switch (triple.getOS()) {
     case llvm::Triple::Darwin:
     case llvm::Triple::MacOSX:
@@ -214,12 +233,19 @@ auto AppendDefaultClangArgs(const InstallPaths& install_paths,
 
   // Append our exact header search paths for the various parts of the C++
   // standard library headers as we don't build a single unified tree.
-  for (const std::filesystem::path& runtime_path :
-       {install_paths.libunwind_path(), install_paths.libcxx_path(),
-        install_paths.libcxxabi_path()}) {
-    args.push_back(llvm::formatv("-stdlib++-isystem{0}",
-                                 (runtime_path / "include").string())
-                       .str());
+  if (is_msvc) {
+    append_gnu_arg(
+        llvm::formatv("-stdlib++-isystem{0}",
+                      (install_paths.libcxx_path() / "include").string())
+            .str());
+  } else {
+    for (const std::filesystem::path& runtime_path :
+         {install_paths.libunwind_path(), install_paths.libcxx_path(),
+          install_paths.libcxxabi_path()}) {
+      append_gnu_arg(llvm::formatv("-stdlib++-isystem{0}",
+                                   (runtime_path / "include").string())
+                         .str());
+    }
   }
 }
 

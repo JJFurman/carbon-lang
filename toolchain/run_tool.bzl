@@ -8,18 +8,23 @@ def _run_tool_impl(ctx):
     tool_files = ctx.attr.tool.files.to_list()
     if len(tool_files) != 1:
         fail("Expected 1 tool file, found {0}".format(len(tool_files)))
+    tool_file = tool_files[0]
+    ext = "." + tool_file.extension if tool_file.extension else ""
+    out = ctx.actions.declare_file(ctx.label.name + ext)
     ctx.actions.symlink(
-        output = ctx.outputs.executable,
-        target_file = tool_files[0],
+        output = out,
+        target_file = tool_file,
         is_executable = True,
     )
     return [
         DefaultInfo(
-            runfiles = ctx.runfiles(files = ctx.files.data),
+            executable = out,
+            files = depset([out]),
+            runfiles = ctx.runfiles(files = ctx.files.data + [out]),
         ),
         RunEnvironmentInfo(
             environment = ctx.attr.env |
-                          {"CARBON_ARGV0_OVERRIDE": tool_files[0].short_path},
+                          {"CARBON_ARGV0_OVERRIDE": tool_file.short_path},
         ),
     ]
 
