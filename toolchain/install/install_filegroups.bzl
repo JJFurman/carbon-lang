@@ -40,6 +40,7 @@ def _toolchain_llvm_binaries_impl(ctx):
         ctx.actions.symlink(
             output = out,
             target_file = ctx.files.carbon_binary[0],
+            is_executable = True,
         )
         outputs.append(out)
 

@@ -143,7 +143,6 @@ cc_binary(
         "//toolchain/base:install_paths",
         "//toolchain/base:llvm_tools_def",
         "//toolchain/driver",
-        "@llvm-project//clang:driver",
         "@llvm-project//llvm:Support",
     ],
 )
@@ -776,6 +775,22 @@ pkg_zip(
     package_file_name = "carbon_toolchain-$(version).zip",
     package_variables = ":packaging_variables",
     stamp = -1,  # Allow `--stamp` builds to produce file timestamps.
+    target_compatible_with = ["@platforms//os:windows"],
+)
+
+py_test(
+    name = "carbon_toolchain_zip_test",
+    size = "small",
+    srcs = ["toolchain_tar_test.py"],
+    data = [
+        ":carbon_toolchain_zip",
+        ":install_data_manifest.txt",
+    ],
+    env = {
+        "INSTALL_DATA_MANIFEST": "$(location :install_data_manifest.txt)",
+        "ZIP_FILE": "$(location :carbon_toolchain_zip)",
+    },
+    main = "toolchain_tar_test.py",
     target_compatible_with = ["@platforms//os:windows"],
 )
 

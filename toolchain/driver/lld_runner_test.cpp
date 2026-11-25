@@ -267,9 +267,9 @@ TEST(LldRunnerTest, CoffLinkTest) {
   EXPECT_TRUE(Testing::CallWithCapturedOutput(
       out, err,
       [&] {
-        return lld.CoffLink({"/machine:x64", "/subsystem:console",
-                             "/entry:main", out_arg, test_a_output.string(),
-                             test_b_output.string()});
+        return lld.CoffLink({"/lldignoreenv", "/machine:x64",
+                             "/subsystem:console", "/entry:main", out_arg,
+                             test_a_output.string(), test_b_output.string()});
       }))
       << "Verbose output from runner:\n"
       << verbose_out.TakeStr() << "\nStderr:\n"
@@ -285,8 +285,9 @@ TEST(LldRunnerTest, CoffLinkTest) {
   EXPECT_FALSE(Testing::CallWithCapturedOutput(
       out, err,
       [&] {
-        return lld.CoffLink({"/machine:x64", "/subsystem:console",
-                             "/entry:main", out_arg, test_b_output.string()});
+        return lld.CoffLink({"/lldignoreenv", "/machine:x64",
+                             "/subsystem:console", "/entry:main", out_arg,
+                             test_b_output.string()});
       }))
       << "Verbose output from runner:\n"
       << verbose_out.TakeStr() << "\n";

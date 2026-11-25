@@ -2,19 +2,23 @@
 // Exceptions. See /LICENSE for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include <cstddef>
 #include <cstdlib>
+#include <optional>
 #include <string>
 
-#include "clang/Driver/Driver.h"
 #include "common/bazel_working_dir.h"
 #include "common/env.h"
 #include "common/error.h"
 #include "common/filesystem.h"
 #include "common/init_llvm.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/Allocator.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Driver.h"
 #include "llvm/Support/Error.h"
 #include "toolchain/base/install_paths.h"
@@ -22,6 +26,46 @@
 #include "toolchain/install/busybox_info.h"
 
 namespace Carbon {
+
+// Selects the response-file tokenizer matching the tool mode, explicit
+// `--rsp-quoting` flags, and host platform.
+static auto GetResponseFileTokenizer(const std::optional<std::string>& mode,
+                                     llvm::ArrayRef<const char*> raw_args)
+    -> llvm::cl::TokenizerCallback {
+  enum class RspQuoting { Default, Posix, Windows };
+  RspQuoting quoting = RspQuoting::Default;
+  bool default_windows = false;
+#ifdef _WIN32
+  default_windows = true;
+#endif
+  if (mode && llvm::StringSwitch<bool>(*mode)
+                  .Cases({"clang-cl", "lld-link", "llvm-lib", "llvm-ml",
+                          "llvm-mt", "llvm-rc"},
+                         true)
+                  .Default(false)) {
+    default_windows = true;
+  }
+  for (size_t i = 0; i < raw_args.size(); ++i) {
+    llvm::StringRef arg = raw_args[i];
+    if (arg == "--rsp-quoting=posix") {
+      quoting = RspQuoting::Posix;
+    } else if (arg == "--rsp-quoting=windows") {
+      quoting = RspQuoting::Windows;
+    } else if (arg == "--driver-mode=cl" || arg == "--platform=coff") {
+      default_windows = true;
+    } else if (arg == "--platform" && i + 1 < raw_args.size() &&
+               llvm::StringRef(raw_args[i + 1]) == "coff") {
+      default_windows = true;
+    }
+  }
+  if (quoting == RspQuoting::Posix) {
+    return &llvm::cl::TokenizeGNUCommandLine;
+  }
+  if (quoting == RspQuoting::Windows || default_windows) {
+    return &llvm::cl::TokenizeWindowsCommandLine;
+  }
+  return &llvm::cl::TokenizeGNUCommandLine;
+}
 
 // The actual `main` implementation. Can return an exit code or an `Error`
 // (which causes EXIT_FAILRUE).
@@ -51,15 +95,13 @@ static auto Main(int argc, char** argv) -> ErrorOr<int> {
   llvm::SmallVector<const char*> raw_args;
   raw_args.append(argv + 1, argv + argc);
 
-  // Expand any response files in the arguments, except for `lld-link`, which
-  // expands response files itself using Windows quoting by default.
+  // Expand any response files in the arguments without inserting EOL `nullptr`
+  // sentinels, preserving Windows backslash quoting where appropriate.
   llvm::BumpPtrAllocator alloc;
-  if (!busybox_info.mode || *busybox_info.mode != "lld-link") {
-    if (llvm::Error error = clang::driver::expandResponseFiles(
-            raw_args, busybox_info.mode && *busybox_info.mode == "clang-cl",
-            alloc, fs.get())) {
-      return Error(llvm::toString(std::move(error)));
-    }
+  llvm::cl::ExpansionContext expansion_ctx(
+      alloc, GetResponseFileTokenizer(busybox_info.mode, raw_args), fs.get());
+  if (llvm::Error error = expansion_ctx.expandResponseFiles(raw_args)) {
+    return Error(llvm::toString(std::move(error)));
   }
 
   llvm::SmallVector<llvm::StringRef> args;
