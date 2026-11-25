@@ -166,7 +166,7 @@ auto AppendDefaultClangArgs(const InstallPaths& install_paths,
     }
   };
 
-  llvm::Triple triple(target_str);
+  llvm::Triple triple(llvm::Triple::normalize(target_str));
   bool is_msvc = triple.isKnownWindowsMSVCEnvironment();
 
   if (!is_msvc && !is_clang_cl) {

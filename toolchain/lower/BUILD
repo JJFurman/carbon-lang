@@ -94,6 +94,7 @@ cc_library(
         "@llvm-project//llvm:Linker",
         "@llvm-project//llvm:Passes",
         "@llvm-project//llvm:Support",
+        "@llvm-project//llvm:TargetParser",
         "@llvm-project//llvm:TransformUtils",
     ],
 )

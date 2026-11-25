@@ -13,6 +13,7 @@
 #include "llvm/IR/DIBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/TargetParser/Triple.h"
 #include "toolchain/base/fixed_size_value_store.h"
 #include "toolchain/lower/options.h"
 #include "toolchain/parse/tree_and_subtrees.h"

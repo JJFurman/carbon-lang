@@ -107,7 +107,7 @@ ClangRuntimesBuilderBase::ClangRuntimesBuilderBase(
     : clang_(clang),
       vlog_stream_(clang_->vlog_stream_),
       tasks_(*threads),
-      target_triple_(features.target),
+      target_triple_(llvm::Triple::normalize(features.target)),
       target_flag_(llvm::formatv("--target={0}", target_triple_.str())),
       result_(Error("Did not finish building the runtime!")) {
   if (!features.cpu.empty() || !features.tune_cpu.empty() ||
@@ -644,6 +644,14 @@ auto ClangResourceDirBuilder::CollectBuiltinsSrcFiles()
       }
       return false;
     });
+    if (target_triple_.isArch64Bit()) {
+      // Restore the portable C implementations overridden by the SysV x86_64
+      // assembly files removed above.
+      src_files.append({
+          "runtimes/builtins/floatundidf.c",
+          "runtimes/builtins/floatundisf.c",
+      });
+    }
   }
   return src_files;
 }

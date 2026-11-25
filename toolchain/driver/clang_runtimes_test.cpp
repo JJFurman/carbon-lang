@@ -270,7 +270,8 @@ class ClangRuntimesTest : public ::testing::Test {
   // Note that we can't test arbitrary targets here as we need to be able to
   // compile the builtin functions for the target. We use the default target as
   // the most likely to pass.
-  std::string target_ = llvm::sys::getDefaultTargetTriple();
+  std::string target_ =
+      llvm::Triple::normalize(llvm::sys::getDefaultTargetTriple());
   llvm::Triple target_triple_{target_};
 
   Runtimes::Cache runtimes_cache_ =

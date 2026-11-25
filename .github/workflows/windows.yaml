@@ -283,7 +283,7 @@ jobs:
             throw "Unexpected day1_part1.exe output: '$day1Out', expected '11'"
           }
 
-          $busyboxPath = (bazelisk.exe cquery --output=files //toolchain/install:carbon-busybox | Select-Object -First 1).Trim()
+          $busyboxPath = @(bazelisk.exe cquery --output=files //toolchain/install:carbon-busybox)[0].Trim()
           Copy-Item -Force $busyboxPath (Join-Path $artifactsDir 'carbon-busybox.exe')
           Get-ChildItem $artifactsDir
 

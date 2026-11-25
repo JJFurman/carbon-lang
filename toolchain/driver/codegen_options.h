@@ -12,6 +12,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/TargetParser/Host.h"
+#include "llvm/TargetParser/Triple.h"
 
 namespace Carbon {
 
@@ -29,7 +30,8 @@ struct CodegenOptions {
   // `target_cpu_tune`, and `target_cpu_features`.
   auto GetClangArgs() const -> llvm::SmallVector<std::string>;
 
-  std::string host = llvm::sys::getDefaultTargetTriple();
+  std::string host =
+      llvm::Triple::normalize(llvm::sys::getDefaultTargetTriple());
   llvm::StringRef target;
   llvm::StringRef target_cpu;
   llvm::StringRef target_cpu_tune;

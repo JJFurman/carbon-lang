@@ -433,40 +433,49 @@ TEST_F(ClangRunnerTest, ComputeRuntimesFeatures) {
                        .target_cpu_features = "+f,+zfinx"}),
               IsError(_));
 
-  // Windows MSVC target should succeed without `-fPIE` errors.
+  // Windows MSVC target (both canonical and unnormalized `x86_64-pc-win32`)
+  // should succeed without `-fPIE` errors.
   auto win_msvc = compute({.target = "x86_64-pc-windows-msvc"});
   ASSERT_THAT(win_msvc, IsSuccess(_));
+  EXPECT_THAT(win_msvc->target, StrEq("x86_64-pc-windows-msvc"));
   EXPECT_THAT(win_msvc->cpu, StrEq("x86-64"));
+
+  auto win32_unnormalized = compute({.target = "x86_64-pc-win32"});
+  ASSERT_THAT(win32_unnormalized, IsSuccess(_));
+  EXPECT_THAT(win32_unnormalized->target, StrEq("x86_64-pc-windows-msvc"));
+  EXPECT_THAT(win32_unnormalized->cpu, StrEq("x86-64"));
 }
 
 TEST_F(ClangRunnerTest, WindowsMsvcLinkCommandEcho) {
   std::filesystem::path foo_file = *Testing::WriteTestFile("win_foo.obj", "");
 
-  RawStringOstream verbose_out;
-  ClangRunner runner(&install_paths_, vfs_, &verbose_out);
-  std::string out;
-  std::string err;
-  EXPECT_THAT(Testing::CallWithCapturedOutput(
-                  out, err,
-                  [&] {
-                    return runner.RunWithNoRuntimes(
-                        {"--driver-mode=g++", "--target=x86_64-pc-windows-msvc",
-                         "-nostartfiles", "-Wl,-defaultlib:msvcrt",
-                         "-Wl,-defaultlib:oldnames", "-###", "-o", "app.exe",
-                         foo_file.string()});
-                  }),
-              IsSuccess(true))
-      << "Verbose output from runner:\n"
-      << verbose_out.TakeStr() << "\n";
-  verbose_out.clear();
+  for (llvm::StringRef target_flag :
+       {"--target=x86_64-pc-windows-msvc", "--target=x86_64-pc-win32"}) {
+    RawStringOstream verbose_out;
+    ClangRunner runner(&install_paths_, vfs_, &verbose_out);
+    std::string out;
+    std::string err;
+    EXPECT_THAT(Testing::CallWithCapturedOutput(
+                    out, err,
+                    [&] {
+                      return runner.RunWithNoRuntimes(
+                          {"--driver-mode=g++", target_flag, "-nostartfiles",
+                           "-Wl,-defaultlib:msvcrt", "-Wl,-defaultlib:oldnames",
+                           "-###", "-o", "app.exe", foo_file.string()});
+                    }),
+                IsSuccess(true))
+        << "Target flag: " << target_flag << "\nVerbose output from runner:\n"
+        << verbose_out.TakeStr() << "\n";
+    verbose_out.clear();
 
-  EXPECT_THAT(out, StrEq(""));
-  EXPECT_THAT(err, HasSubstr("lld-link")) << err;
-  EXPECT_THAT(err, HasSubstr("-out:app.exe")) << err;
-  EXPECT_THAT(err, HasSubstr("-defaultlib:msvcrt")) << err;
-  EXPECT_THAT(err, HasSubstr("-defaultlib:oldnames")) << err;
-  EXPECT_THAT(err, HasSubstr(foo_file.string())) << err;
-  EXPECT_THAT(err, Not(HasSubstr("-defaultlib:libcmt"))) << err;
+    EXPECT_THAT(out, StrEq(""));
+    EXPECT_THAT(err, HasSubstr("lld-link")) << err;
+    EXPECT_THAT(err, HasSubstr("-out:app.exe")) << err;
+    EXPECT_THAT(err, HasSubstr("-defaultlib:msvcrt")) << err;
+    EXPECT_THAT(err, HasSubstr("-defaultlib:oldnames")) << err;
+    EXPECT_THAT(err, HasSubstr(foo_file.string())) << err;
+    EXPECT_THAT(err, Not(HasSubstr("-defaultlib:libcmt"))) << err;
+  }
 }
 
 TEST_F(ClangRunnerTest, ClangClCompileCommandEcho) {

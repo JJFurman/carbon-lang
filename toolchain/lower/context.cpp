@@ -46,7 +46,7 @@ Context::Context(
       llvm_module_(llvm_module_owner_ ? llvm_module_owner_.get()
                                       : cpp_code_generator_->GetModule()),
       file_system_(std::move(fs)),
-      target_triple_(target),
+      target_triple_(llvm::Triple::normalize(target)),
       opt_level_(opt_level),
       di_builder_(*llvm_module_),
       di_compile_unit_(want_debug_info

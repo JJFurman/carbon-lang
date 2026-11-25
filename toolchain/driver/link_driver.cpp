@@ -69,7 +69,8 @@ auto LinkDriver::Link(DriverEnv& driver_env) -> DriverResult {
   clang_args.push_back("--driver-mode=g++");
 
   // Pass the target and codegen flags down to Clang as defaults.
-  llvm::Triple target_triple(options_->codegen_options->target);
+  llvm::Triple target_triple(
+      llvm::Triple::normalize(options_->codegen_options->target));
   std::string target_arg =
       llvm::formatv("--target={0}", options_->codegen_options->target).str();
   clang_args.push_back(target_arg);
