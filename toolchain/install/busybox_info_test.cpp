@@ -364,5 +364,39 @@ TEST_F(BusyboxInfoTest, EnvBinaryPathOverride) {
   EXPECT_THAT(std::getenv(Argv0OverrideEnv), Eq(nullptr));
 }
 
+// Tests wrapper-stub invocations (as used by `busybox_launcher_win.exe`) where
+// `CARBON_ARGV0_OVERRIDE` points to a non-symlink launcher binary inside an
+// install tree. Does not require symlink support so it runs everywhere.
+TEST(BusyboxInfoLauncherTest, NonSymlinkStubWithArgv0Override) {
+  ASSERT_THAT(std::getenv(Argv0OverrideEnv), Eq(nullptr));
+
+  Filesystem::RemovingDir dir = std::move(*Filesystem::MakeTmpDir());
+  std::filesystem::path root = dir.path();
+
+  Filesystem::Dir lib_carbon = *dir.CreateDirectories("prefix/lib/carbon");
+  lib_carbon.WriteFileFromString("carbon-busybox", "busybox").Check();
+  Filesystem::Dir llvm_bin = *lib_carbon.CreateDirectories("llvm/bin");
+  llvm_bin.WriteFileFromString("lld-link", "launcher").Check();
+  Filesystem::Dir bin = *dir.CreateDirectories("prefix/bin");
+  bin.WriteFileFromString("carbon", "launcher").Check();
+
+  auto cleanup_env = llvm::scope_exit([] { UnsetEnv(Argv0OverrideEnv); });
+
+  SetEnv(Argv0OverrideEnv, (root / "prefix/bin/carbon").string().c_str());
+  auto info = GetBusyboxInfo("/some/nonexistent/path");
+  ASSERT_TRUE(info.ok()) << info.error();
+  EXPECT_THAT(info->bin_path, Eq(root / "prefix/lib/carbon/carbon-busybox"));
+  EXPECT_THAT(info->mode, Eq(std::nullopt));
+  EXPECT_THAT(std::getenv(Argv0OverrideEnv), Eq(nullptr));
+
+  SetEnv(Argv0OverrideEnv,
+         (root / "prefix/lib/carbon/llvm/bin/lld-link").string().c_str());
+  info = GetBusyboxInfo("/some/nonexistent/path");
+  ASSERT_TRUE(info.ok()) << info.error();
+  EXPECT_THAT(info->bin_path, Eq(root / "prefix/lib/carbon/carbon-busybox"));
+  EXPECT_THAT(info->mode, Eq("lld-link"));
+  EXPECT_THAT(std::getenv(Argv0OverrideEnv), Eq(nullptr));
+}
+
 }  // namespace
 }  // namespace Carbon

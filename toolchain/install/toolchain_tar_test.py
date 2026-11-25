@@ -10,15 +10,17 @@ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 import os
 import re
+import stat
+import sys
 import tarfile
 import unittest
-from pathlib import Path
+import zipfile
+from pathlib import Path, PurePosixPath
 
 
 class ToolchainTarTest(unittest.TestCase):
-    def test_tar(self) -> None:
+    def test_archive(self) -> None:
         install_data_manifest = Path(os.environ["INSTALL_DATA_MANIFEST"])
-        tar_file = Path(os.environ["TAR_FILE"])
 
         # Gather install data files.
         with open(install_data_manifest) as manifest:
@@ -32,41 +34,53 @@ class ToolchainTarTest(unittest.TestCase):
             )
         self.assertTrue(install_files, f"`{install_data_manifest}` is empty.")
 
-        # Gather tar files.
-        with tarfile.open(tar_file) as tar:
-            # Remove the first path component.
-            tar_files = set(
-                [
-                    str(Path(*Path(tarinfo.name).parts[1:]))
-                    for tarinfo in tar
-                    if not tarinfo.isdir()
-                ]
-            )
-        self.assertTrue(install_files, f"`{install_data_manifest}` is empty.")
+        if "ZIP_FILE" in os.environ:
+            zip_file = Path(os.environ["ZIP_FILE"])
+            archive_files = set()
+            with zipfile.ZipFile(zip_file) as zf:
+                for info in zf.infolist():
+                    if info.is_dir():
+                        continue
+                    mode = info.external_attr >> 16
+                    self.assertFalse(
+                        stat.S_ISLNK(mode),
+                        f"Unexpected symlink `{info.filename}` in `{zip_file}`",
+                    )
+                    parts = PurePosixPath(info.filename).parts[1:]
+                    archive_files.add(PurePosixPath(*parts).as_posix())
+            self.assertTrue(archive_files, f"`{zip_file}` is empty.")
+        else:
+            tar_file = Path(os.environ["TAR_FILE"])
+            with tarfile.open(tar_file) as tar:
+                # Remove the first path component.
+                archive_files = set(
+                    [
+                        PurePosixPath(
+                            *PurePosixPath(tarinfo.name).parts[1:]
+                        ).as_posix()
+                        for tarinfo in tar
+                        if not tarinfo.isdir()
+                    ]
+                )
+            self.assertTrue(archive_files, f"`{tar_file}` is empty.")
 
-        # Gather tar files.
-        with tarfile.open(tar_file) as tar:
-            # Remove the first path component.
-            tar_files = set(
-                [
-                    str(Path(*Path(tarinfo.name).parts[1:]))
-                    for tarinfo in tar
-                    if not tarinfo.isdir()
-                ]
-            )
-        self.assertTrue(tar_files, f"`{tar_file}` is empty.")
-
-        # Check that the `carbon` symlink is in the tar file.
-        self.assertIn("bin/carbon", tar_files)
-        tar_files.remove("bin/carbon")
+        # Check that the `carbon` entry is in the archive.
+        expected_bin = (
+            "bin/carbon.exe" if sys.platform == "win32" else "bin/carbon"
+        )
+        self.assertIn(expected_bin, archive_files)
+        archive_files.remove(expected_bin)
 
         # Remove the `lib/carbon` prefix which should be on every other file.
-        tar_files = set(
-            [re.sub("^lib/carbon/", "", entry.strip()) for entry in tar_files]
+        archive_files = set(
+            [
+                re.sub("^lib/carbon/", "", entry.strip())
+                for entry in archive_files
+            ]
         )
 
-        # The install files and the tar files should now be identical.
-        self.assertSetEqual(install_files, tar_files)
+        # The install files and the archive files should now be identical.
+        self.assertSetEqual(install_files, archive_files)
 
 
 if __name__ == "__main__":

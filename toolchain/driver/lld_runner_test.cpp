@@ -70,6 +70,20 @@ TEST(LldRunnerTest, Version) {
   // The Darwin link code path doesn't print anything distinct, so instead check
   // that the GNU output isn't repeated.
   EXPECT_THAT(out, Not(HasSubstr("GNU")));
+
+  // Try the COFF/Windows linker.
+  EXPECT_TRUE(Testing::CallWithCapturedOutput(
+      out, err, [&] { return runner.CoffLink({"--version"}); }));
+
+  // Again, the arguments to LLD should be part of the verbose log.
+  EXPECT_THAT(test_os.TakeStr(), HasSubstr("--version"));
+
+  // Nothing should print to stderr.
+  EXPECT_THAT(err, StrEq(""));
+
+  // We don't care about any particular version.
+  EXPECT_THAT(out, HasSubstr("LLD"));
+  EXPECT_THAT(out, Not(HasSubstr("GNU")));
 }
 
 static auto CompileTwoSources(const InstallPaths& install_paths,
@@ -208,6 +222,81 @@ TEST(LldRunnerTest, MachOLinkTest) {
   // The missing symbol should be diagnosed on `stderr`.
   EXPECT_THAT(out, StrEq(""));
   EXPECT_THAT(err, HasSubstr("undefined symbol: __Z6test_av"));
+}
+
+TEST(LldRunnerTest, CoffLinkTest) {
+  const auto install_paths =
+      InstallPaths::MakeForBazelRunfiles(Testing::GetExePath());
+
+  std::filesystem::path test_a_file =
+      *Testing::WriteTestFile("test_a.cpp", "int test_a() { return 0; }");
+  std::filesystem::path test_b_file = *Testing::WriteTestFile(
+      "test_b.cpp", "int test_a();\nint main() { return test_a(); }");
+  std::filesystem::path test_a_output =
+      *Testing::WriteTestFile("test_a.obj", "");
+  std::filesystem::path test_b_output =
+      *Testing::WriteTestFile("test_b.obj", "");
+
+  // Compile both sources to COFF `.obj` files via `-cc1` so the test is
+  // independent of target-specific driver default flags.
+  RawStringOstream verbose_out;
+  auto vfs = llvm::vfs::getRealFileSystem();
+  ClangRunner clang(&install_paths, vfs, &verbose_out);
+  std::string out;
+  std::string err;
+  for (const auto& [src, obj] : {std::pair{&test_a_file, &test_a_output},
+                                 std::pair{&test_b_file, &test_b_output}}) {
+    CARBON_CHECK(*Testing::CallWithCapturedOutput(
+                     out, err,
+                     [&] {
+                       return clang.RunWithNoRuntimes(
+                           {"-cc1", "-triple", "x86_64-pc-windows-msvc",
+                            "-emit-obj", "-o", obj->string(), src->string()});
+                     }),
+                 "Verbose output from runner:\n{0}\nStderr:\n{1}\n",
+                 verbose_out.TakeStr(), err);
+    verbose_out.clear();
+  }
+
+  std::filesystem::path test_output = *Testing::WriteTestFile("test.exe", "");
+  std::string out_arg = llvm::formatv("/out:{0}", test_output.string()).str();
+
+  // Link the two COFF object files together into an executable using `main` as
+  // the entry point so no C runtime libraries are required.
+  LldRunner lld(&install_paths, &verbose_out);
+  EXPECT_TRUE(Testing::CallWithCapturedOutput(
+      out, err,
+      [&] {
+        return lld.CoffLink({"/lldignoreenv", "/machine:x64",
+                             "/subsystem:console", "/entry:main", out_arg,
+                             test_a_output.string(), test_b_output.string()});
+      }))
+      << "Verbose output from runner:\n"
+      << verbose_out.TakeStr() << "\nStderr:\n"
+      << err << "\n";
+  verbose_out.clear();
+
+  // No output should be produced.
+  EXPECT_THAT(out, StrEq(""));
+  EXPECT_THAT(err, StrEq(""));
+
+  // Re-do the link, but with only one of the inputs. This should fail due to an
+  // unresolved symbol.
+  EXPECT_FALSE(Testing::CallWithCapturedOutput(
+      out, err,
+      [&] {
+        return lld.CoffLink({"/lldignoreenv", "/machine:x64",
+                             "/subsystem:console", "/entry:main", out_arg,
+                             test_b_output.string()});
+      }))
+      << "Verbose output from runner:\n"
+      << verbose_out.TakeStr() << "\n";
+  verbose_out.clear();
+
+  // The missing symbol should be diagnosed on `stderr`.
+  EXPECT_THAT(out, StrEq(""));
+  EXPECT_THAT(err, HasSubstr("undefined symbol:"));
+  EXPECT_THAT(err, HasSubstr("test_a"));
 }
 
 }  // namespace

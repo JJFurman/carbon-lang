@@ -61,14 +61,31 @@ auto GetBusyboxInfo(const char* argv0) -> ErrorOr<BusyboxInfo> {
   std::filesystem::path argv0_path = argv0;
 
   // Check for an override of `argv[0]` from the environment and apply it.
+  bool has_argv0_override = false;
   if (const char* argv0_override = std::getenv(Argv0OverrideEnv)) {
     argv0_path = argv0_override;
+    has_argv0_override = true;
     UnsetEnv(Argv0OverrideEnv);
   }
 
-  BusyboxInfo info = {
-      .bin_path = FindExecutablePath(argv0_path.string().c_str()),
-      .mode = GetMode(argv0_path)};
+  // When launched via a wrapper binary (such as `busybox_launcher_win.exe`)
+  // that sets `CARBON_ARGV0_OVERRIDE`, `argv0_path` points to the wrapper
+  // executable rather than a symlink to `carbon-busybox`. Preserve `argv0_path`
+  // when it refers to an accessible non-busybox file so install-relative
+  // resolution runs without collapsing symlinks via `getMainExecutable()`.
+  std::filesystem::path initial_bin_path;
+  if (has_argv0_override && GetExeBaseName(argv0_path) != "carbon-busybox") {
+    if (auto access = Filesystem::Cwd().Access(argv0_path);
+        access.ok() && *access) {
+      initial_bin_path = argv0_path;
+    }
+  }
+  if (initial_bin_path.empty()) {
+    initial_bin_path = FindExecutablePath(argv0_path.string().c_str());
+  }
+
+  BusyboxInfo info = {.bin_path = std::move(initial_bin_path),
+                      .mode = GetMode(argv0_path)};
 
   // Now search through any symlinks to locate the installed busybox binary.
   while (true) {
@@ -128,6 +145,29 @@ auto GetBusyboxInfo(const char* argv0) -> ErrorOr<BusyboxInfo> {
     // installation there or are linked directly to the busybox.
     auto readlink = Filesystem::Cwd().Readlink(info.bin_path);
     if (!readlink.ok()) {
+      // A wrapper binary launched adjacent to `carbon-busybox` won't be a
+      // symlink or inside a `bin/` directory; check the same directory as a
+      // final fallback when `CARBON_ARGV0_OVERRIDE` was provided.
+      if (has_argv0_override) {
+#ifdef _WIN32
+        for (std::string_view busybox_filename :
+             {"carbon-busybox.exe", "carbon-busybox"}) {
+          auto busybox_path = parent_path / busybox_filename;
+          if (auto access = Filesystem::Cwd().Access(busybox_path);
+              access.ok() && *access) {
+            info.bin_path = busybox_path;
+            return info;
+          }
+        }
+#else
+        auto busybox_path = parent_path / "carbon-busybox";
+        if (auto access = Filesystem::Cwd().Access(busybox_path);
+            access.ok() && *access) {
+          info.bin_path = busybox_path;
+          return info;
+        }
+#endif
+      }
       return ErrorBuilder() << "expected carbon-busybox symlink at `"
                             << info.bin_path.string() << "`";
     }

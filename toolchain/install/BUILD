@@ -34,6 +34,7 @@ load(
 )
 load("@llvm-project//libcxx:libcxx_library.bzl", "libcxx_and_abi_copts")
 load("@llvm-project//libunwind:libunwind_library.bzl", "libunwind_copts")
+load("@rules_pkg//pkg:zip.bzl", "pkg_zip")
 load("@rules_python//python:defs.bzl", "py_test")
 load("//bazel/cc_rules:defs.bzl", "cc_binary", "cc_library", "cc_test")
 load(
@@ -142,9 +143,19 @@ cc_binary(
         "//toolchain/base:install_paths",
         "//toolchain/base:llvm_tools_def",
         "//toolchain/driver",
-        "@llvm-project//clang:driver",
         "@llvm-project//llvm:Support",
     ],
+)
+
+cc_binary(
+    name = "busybox_launcher_win",
+    srcs = ["busybox_launcher_win.cpp"],
+    additional_linker_inputs = ["carbon_busybox.manifest.xml"],
+    linkopts = [
+        "/MANIFEST:EMBED",
+        "/MANIFESTINPUT:$(execpath carbon_busybox.manifest.xml)",
+    ],
+    target_compatible_with = ["@platforms//os:windows"],
 )
 
 toolchain_files(
@@ -154,7 +165,14 @@ toolchain_files(
 
 toolchain_llvm_binaries(
     name = "llvm_bins",
-    carbon_binary = ":carbon-busybox",
+    carbon_binary = select({
+        "@platforms//os:windows": ":busybox_launcher_win",
+        "//conditions:default": ":carbon-busybox",
+    }),
+    exe_extension = select({
+        "@platforms//os:windows": ".exe",
+        "//conditions:default": "",
+    }),
 )
 
 toolchain_files(
@@ -729,7 +747,9 @@ toolchain_pkg_filegroup(
         "install_digest.txt",
         ":all_data_files",
     ],
+    busybox_launcher = ":busybox_launcher_win",
     carbon_busybox = ":carbon-busybox",
+    llvm_bins = ":llvm_bins",
 )
 
 # We build both a compressed and uncompressed tar file with the same code here.
@@ -746,6 +766,32 @@ pkg_tar_and_test(
     package_file_name_base = "carbon_toolchain-$(version)",
     package_variables = ":packaging_variables",
     stamp = -1,  # Allow `--stamp` builds to produce file timestamps.
+)
+
+pkg_zip(
+    name = "carbon_toolchain_zip",
+    srcs = [":stage1_pkg_data"],
+    package_dir = "carbon_toolchain-$(version)",
+    package_file_name = "carbon_toolchain-$(version).zip",
+    package_variables = ":packaging_variables",
+    stamp = -1,  # Allow `--stamp` builds to produce file timestamps.
+    target_compatible_with = ["@platforms//os:windows"],
+)
+
+py_test(
+    name = "carbon_toolchain_zip_test",
+    size = "small",
+    srcs = ["toolchain_tar_test.py"],
+    data = [
+        ":carbon_toolchain_zip",
+        ":install_data_manifest.txt",
+    ],
+    env = {
+        "INSTALL_DATA_MANIFEST": "$(location :install_data_manifest.txt)",
+        "ZIP_FILE": "$(location :carbon_toolchain_zip)",
+    },
+    main = "toolchain_tar_test.py",
+    target_compatible_with = ["@platforms//os:windows"],
 )
 
 filegroup_with_stage(

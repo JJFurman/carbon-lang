@@ -18,6 +18,10 @@ auto LldOptions::Build(CommandLine::CommandBuilder& b) -> void {
   std::string default_target = llvm::sys::getDefaultTargetTriple();
   llvm::Triple default_triple(default_target);
   switch (default_triple.getObjectFormat()) {
+    case llvm::Triple::COFF:
+      platform = Platform::Coff;
+      break;
+
     case llvm::Triple::MachO:
       platform = Platform::MachO;
       break;
@@ -41,6 +45,8 @@ target's platform.
       [&](auto& arg_b) {
         arg_b.SetOneOf(
             {
+                arg_b.OneOfValue("coff", Platform::Coff),
+
                 arg_b.OneOfValue("elf", Platform::Elf),
                 // Some of LLD documentation uses "Unix" or "GNU", so
                 // include an alias here.
@@ -100,6 +106,8 @@ auto LldSubcommand::Run(DriverEnv& driver_env) -> DriverResult {
   }
 
   switch (options_.platform) {
+    case LldOptions::Platform::Coff:
+      return {.success = runner.CoffLink(options_.args)};
     case LldOptions::Platform::Elf:
       return {.success = runner.ElfLink(options_.args)};
     case LldOptions::Platform::MachO:

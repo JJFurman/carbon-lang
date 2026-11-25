@@ -19,6 +19,9 @@ class LldRunner : ToolRunnerBase {
  public:
   using ToolRunnerBase::ToolRunnerBase;
 
+  // Run LLD as a COFF/Windows-style linker with the provided arguments.
+  auto CoffLink(llvm::ArrayRef<llvm::StringRef> args) -> bool;
+
   // Run LLD as a GNU-style linker with the provided arguments.
   auto ElfLink(llvm::ArrayRef<llvm::StringRef> args) -> bool;
 

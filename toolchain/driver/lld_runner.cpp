@@ -18,10 +18,11 @@
 
 // Declare the supported driver flavor entry points.
 //
-// TODO: Currently, just ELF and MachO, but eventually we should support all of
-// the LLD platforms.
+// TODO: Currently, just COFF, ELF, and MachO, but eventually we should support
+// all of the LLD platforms.
 //
 // NOLINTBEGIN(readability-identifier-naming): External library name.
+LLD_HAS_DRIVER(coff)
 LLD_HAS_DRIVER(elf)
 LLD_HAS_DRIVER(macho)
 // NOLINTEND(readability-identifier-naming)
@@ -51,6 +52,11 @@ auto LldRunner::LinkHelper(llvm::StringLiteral label,
 
   // TODO: Should this be forwarding the full exit code?
   return result.retCode == 0;
+}
+
+auto LldRunner::CoffLink(llvm::ArrayRef<llvm::StringRef> args) -> bool {
+  return LinkHelper("COFF", args, installation_->lld_link_path().string(),
+                    {.f = lld::WinLink, .d = &lld::coff::link});
 }
 
 auto LldRunner::ElfLink(llvm::ArrayRef<llvm::StringRef> args) -> bool {

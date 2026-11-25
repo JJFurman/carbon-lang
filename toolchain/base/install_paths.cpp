@@ -27,6 +27,15 @@ static constexpr llvm::StringLiteral BazelRoot = "carbon/toolchain/install/";
 // Path within an install root for our marker of a valid install.
 static constexpr llvm::StringLiteral MarkerPath = "carbon_install.txt";
 
+// Returns `name` with the platform executable suffix (`.exe` on Windows).
+static auto ExeName(llvm::StringRef name) -> std::string {
+#ifdef _WIN32
+  return (name + ".exe").str();
+#else
+  return name.str();
+#endif
+}
+
 auto InstallPaths::MakeExeRelative(llvm::StringRef exe_path) -> InstallPaths {
   InstallPaths paths;
 
@@ -186,29 +195,28 @@ auto InstallPaths::llvm_install_bin() const -> std::filesystem::path {
 }
 
 auto InstallPaths::clang_path() const -> std::filesystem::path {
-  // TODO: Adjust this to work equally well on Windows.
-  return llvm_install_bin() / "clang";
+  return llvm_install_bin() / ExeName("clang");
 }
 
 auto InstallPaths::lld_path() const -> std::filesystem::path {
-  // TODO: Adjust this to work equally well on Windows.
-  return llvm_install_bin() / "lld";
+  return llvm_install_bin() / ExeName("lld");
 }
 
 auto InstallPaths::ld_lld_path() const -> std::filesystem::path {
-  // TODO: Adjust this to work equally well on Windows.
-  return llvm_install_bin() / "ld.lld";
+  return llvm_install_bin() / ExeName("ld.lld");
 }
 
 auto InstallPaths::ld64_lld_path() const -> std::filesystem::path {
-  // TODO: Adjust this to work equally well on Windows.
-  return llvm_install_bin() / "ld64.lld";
+  return llvm_install_bin() / ExeName("ld64.lld");
+}
+
+auto InstallPaths::lld_link_path() const -> std::filesystem::path {
+  return llvm_install_bin() / ExeName("lld-link");
 }
 
 auto InstallPaths::llvm_tool_path(LLVMTool tool) const
     -> std::filesystem::path {
-  // TODO: Adjust this to work equally well on Windows.
-  return llvm_install_bin() / std::string_view(tool.bin_name());
+  return llvm_install_bin() / ExeName(tool.bin_name());
 }
 
 auto InstallPaths::clang_resource_path() const -> std::filesystem::path {
